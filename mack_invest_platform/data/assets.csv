@@ -1,0 +1,51 @@
+ticker,name,category,contract_mult,currency
+SPY,SPDR S&P 500 ETF,ETF,100,USD
+QQQ,Invesco QQQ Trust,ETF,100,USD
+AAPL,Apple Inc.,Equity,100,USD
+MSFT,Microsoft Corp.,Equity,100,USD
+NVDA,NVIDIA Corp.,Equity,100,USD
+AMZN,Amazon.com Inc.,Equity,100,USD
+GOOGL,Alphabet Inc.,Equity,100,USD
+META,Meta Platforms,Equity,100,USD
+TSLA,Tesla Inc.,Equity,100,USD
+BRK-B,Berkshire Hathaway B,Equity,100,USD
+JPM,JPMorgan Chase,Equity,100,USD
+BAC,Bank of America,Equity,100,USD
+GS,Goldman Sachs,Equity,100,USD
+BTC-USD,Bitcoin USD,Crypto,1,USD
+ETH-USD,Ethereum USD,Crypto,1,USD
+BNB-USD,BNB USD,Crypto,1,USD
+SOL-USD,Solana USD,Crypto,1,USD
+XRP-USD,XRP USD,Crypto,1,USD
+^DJI,Dow Jones Industrial Average,Index,100,USD
+^GSPC,S&P 500 Index,Index,100,USD
+^NDX,Nasdaq 100 Index,Index,100,USD
+^FCHI,CAC 40 Index,Index,100,EUR
+^GDAXI,DAX Index,Index,100,EUR
+^FTSE,FTSE 100 Index,Index,100,GBP
+^STOXX50E,Euro Stoxx 50,Index,100,EUR
+^N225,Nikkei 225,Index,100,JPY
+^HSI,Hang Seng Index,Index,100,HKD
+^VIX,CBOE Volatility Index,Index,100,USD
+0700.HK,Tencent Holdings,Equity,100,HKD
+1299.HK,AIA Group,Equity,100,HKD
+3690.HK,Meituan,Equity,100,HKD
+9988.HK,Alibaba Group,Equity,100,HKD
+6758.T,Sony Group,Equity,100,JPY
+7203.T,Toyota Motor,Equity,100,JPY
+7974.T,Nintendo,Equity,100,JPY
+9432.T,NTT,Equity,100,JPY
+9984.T,SoftBank Group,Equity,100,JPY
+GC=F,Gold Futures,Commodity,100,USD
+SI=F,Silver Futures,Commodity,100,USD
+CL=F,WTI Crude Oil Futures,Commodity,100,USD
+BZ=F,Brent Crude Oil Futures,Commodity,100,USD
+MCL=F,Micro WTI Crude Oil,Commodity,100,USD
+CC=F,Cocoa Futures,Commodity,100,USD
+EURUSD=X,EUR/USD,Forex,100000,USD
+JPY=X,USD/JPY,Forex,100000,USD
+GBP=X,USD/GBP,Forex,100000,USD
+RHM.DE,Rheinmetall AG,Equity,100,EUR
+TTE.PA,TotalEnergies,Equity,100,EUR
+AIR.PA,Airbus SE,Equity,100,EUR
+BNP.PA,BNP Paribas,Equity,100,EUR
