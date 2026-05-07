@@ -1,4 +1,4 @@
-# 📈 ESLSCA Stock Market Game
+# 📈 McKenson Investment Platform - MIP
 
 A full-featured investment simulation platform built with **Streamlit** + **yfinance**.
 
@@ -88,7 +88,7 @@ eslsca_platform/
 
 ## Admin Password
 
-Default: `eslsca2026` — change it in the Admin Panel after first login.
+Default: `MIP2026` — change it in the Admin Panel after first login.
 
 ## Teams
 
