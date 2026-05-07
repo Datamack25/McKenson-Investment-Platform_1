@@ -11,9 +11,19 @@ from utils.data import (get_or_init_state, load_assets, get_price,
 
 
 def render():
+    # ── Guard: ensure state is loaded ──
     state = get_or_init_state()
-    team_id = st.session_state.get("active_team", list(state["teams"].keys())[0])
-    team = state["teams"][team_id]
+    teams = state.get("teams", {})
+    if not teams:
+        st.error("No teams found. Please check your data/teams.csv file.")
+        return
+
+    team_id = st.session_state.get("active_team", list(teams.keys())[0])
+    if team_id not in teams:
+        team_id = list(teams.keys())[0]
+        st.session_state["active_team"] = team_id
+
+    team = teams[team_id]
 
     st.markdown(
         f'<h1 style="font-family:Rajdhani,sans-serif;font-size:2.2rem;'
@@ -22,27 +32,27 @@ def render():
         unsafe_allow_html=True,
     )
 
-    # ── Fetch live prices ──
+    # ── Fetch LIVE prices from yfinance ──
     holdings = team.get("holdings", {})
     prices = {}
     for ticker in holdings:
-        prices[ticker] = get_price(ticker)
+        prices[ticker] = get_price(ticker)   # ttl=60 s, live via yfinance
 
     val = value_portfolio(team, prices)
-    total = val["total"]
-    cash = val["cash"]
-    spot = val["spot_value"]
+    total   = val["total"]
+    cash    = val["cash"]
+    spot    = val["spot_value"]
     initial = 10_000_000.0
 
-    pnl = total - initial
+    pnl     = total - initial
     pnl_pct = pnl / initial * 100
 
     # ── Top metrics ──
     section_title("PORTFOLIO OVERVIEW")
     metric_row([
-        {"label": "Total Value", "value": f"${total:,.0f}", "color": ""},
-        {"label": "Cash", "value": f"${cash:,.0f}", "color": ""},
-        {"label": "Invested", "value": f"${spot:,.0f}", "color": ""},
+        {"label": "Total Value",    "value": f"${total:,.0f}", "color": ""},
+        {"label": "Cash",           "value": f"${cash:,.0f}",  "color": ""},
+        {"label": "Invested",       "value": f"${spot:,.0f}",  "color": ""},
         {"label": "Unrealised P&L", "value": f"${pnl:+,.0f} ({pnl_pct:+.2f}%)",
          "color": "positive" if pnl >= 0 else "negative"},
     ])
@@ -65,9 +75,11 @@ def render():
                 fill="tozeroy",
                 fillcolor="rgba(0,212,255,0.05)",
             ))
-            fig.add_hline(y=initial, line_dash="dot",
-                          line_color="#ff3b6b", opacity=0.5,
-                          annotation_text="Initial")
+            fig.add_hline(
+                y=initial, line_dash="dot",
+                line_color="#ff3b6b", opacity=0.5,
+                annotation_text="Initial",
+            )
             fig.update_layout(
                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                 font=dict(color="#94a3b8", family="Share Tech Mono"),
@@ -109,9 +121,13 @@ def render():
     if val["positions"]:
         pos_df = pd.DataFrame(val["positions"])
         pos_df = pos_df.rename(columns={
-            "ticker": "Ticker", "qty": "Qty",
-            "avg_price": "Avg Price", "current_price": "Last Price",
-            "market_value": "Mkt Value", "unreal_pnl": "Unreal. P&L", "pnl_pct": "P&L %"
+            "ticker":         "Ticker",
+            "qty":            "Qty",
+            "avg_price":      "Avg Price",
+            "current_price":  "Last Price",
+            "market_value":   "Mkt Value",
+            "unreal_pnl":     "Unreal. P&L",
+            "pnl_pct":        "P&L %",
         })
         for col in ["Avg Price", "Last Price", "Mkt Value"]:
             pos_df[col] = pos_df[col].apply(lambda x: f"{x:,.4f}")
@@ -123,6 +139,24 @@ def render():
     else:
         st.info("No open spot positions. Use the Trading Desk to build your portfolio.")
 
+    # ── Live price feed for tracked assets ──
+    section_title("LIVE MARKET SNAPSHOT")
+    assets_df = load_assets()
+    watched = assets_df["ticker"].tolist()
+
+    # Display in a responsive grid of metrics
+    cols_per_row = 5
+    rows = [watched[i:i+cols_per_row] for i in range(0, len(watched), cols_per_row)]
+    for row_tickers in rows:
+        metric_cols = st.columns(len(row_tickers))
+        for mc, tkr in zip(metric_cols, row_tickers):
+            live = get_price(tkr)
+            with mc:
+                if live == live:
+                    st.metric(label=tkr, value=f"{live:,.4f}")
+                else:
+                    st.metric(label=tkr, value="N/A")
+
     # ── Risk metrics ──
     section_title("RISK METRICS (LIVE)")
     history = team.get("portfolio_history", [])
@@ -132,13 +166,13 @@ def render():
         m = compute_portfolio_metrics(rets)
         if m:
             metric_row([
-                {"label": "Ann. Vol", "value": f"{m['ann_vol']*100:.2f}%", "color": ""},
-                {"label": "Sharpe Ratio", "value": f"{m['sharpe']:.2f}",
+                {"label": "Ann. Vol",      "value": f"{m['ann_vol']*100:.2f}%",  "color": ""},
+                {"label": "Sharpe Ratio",  "value": f"{m['sharpe']:.2f}",
                  "color": "positive" if m["sharpe"] >= 2 else "neutral"},
-                {"label": "Max Drawdown", "value": f"{m['max_drawdown']*100:.2f}%",
+                {"label": "Max Drawdown",  "value": f"{m['max_drawdown']*100:.2f}%",
                  "color": "negative" if m["max_drawdown"] < -0.05 else ""},
-                {"label": "VaR 99% 10d", "value": f"{m['var_99_10d']*100:.2f}%", "color": ""},
-                {"label": "CVaR 99% 10d", "value": f"{m['cvar_99_10d']*100:.2f}%", "color": ""},
+                {"label": "VaR 99% 10d",   "value": f"{m['var_99_10d']*100:.2f}%",  "color": ""},
+                {"label": "CVaR 99% 10d",  "value": f"{m['cvar_99_10d']*100:.2f}%", "color": ""},
             ])
     else:
         st.info("Risk metrics available after 5+ trading days of portfolio history.")
