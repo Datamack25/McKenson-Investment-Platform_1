@@ -1,5 +1,5 @@
 """
-ESLSCA Stock Market Game — Main Entry Point
+McKenson Investment Platform - MIP — Main Entry Point
 Run with: streamlit run app.py
 """
 import streamlit as st
@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 st.set_page_config(
-    page_title="ESLSCA Stock Market Game",
+    page_title="MIP Stock Market",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
