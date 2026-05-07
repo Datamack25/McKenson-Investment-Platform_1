@@ -1,5 +1,4 @@
 import streamlit as st
-from components.ui import section_title, inject_css, render_ticker_strip, render_news_banner
 from utils.data import load_events, load_assets, get_price
 
 def render():
