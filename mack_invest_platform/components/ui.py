@@ -1,3 +1,4 @@
+from components.ui import inject_css, render_ticker_strip, render_news_banner, section_title
 import streamlit as st
 from utils.data import load_events, load_assets, get_price
 
