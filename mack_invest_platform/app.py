@@ -3,6 +3,7 @@ McKenson Investment Platform - MIP — Main Entry Point
 Run with: streamlit run app.py
 """
 import streamlit as st
+import pandas as pd
 import sys
 from pathlib import Path
 
@@ -10,7 +11,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 st.set_page_config(
-import pandas as pd
     page_title="MIP Stock Market",
     page_icon="📈",
     layout="wide",
@@ -33,7 +33,6 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Init state early so team selector always has data ──
     state = get_or_init_state()
     teams = state.get("teams", {})
 
@@ -53,7 +52,6 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Team selector
     if teams:
         team_options = {v["emoji"] + " " + v["name"]: k for k, v in teams.items()}
         selected_label = st.selectbox("Select Team", list(team_options.keys()))
