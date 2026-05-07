@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 st.set_page_config(
+import pandas as pd
     page_title="MIP Stock Market",
     page_icon="📈",
     layout="wide",
@@ -32,6 +33,7 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
+    # ── Init state early so team selector always has data ──
     state = get_or_init_state()
     teams = state.get("teams", {})
 
@@ -51,11 +53,14 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Team selector for trading
-    team_options = {v["emoji"] + " " + v["name"]: k for k, v in teams.items()}
-    selected_label = st.selectbox("Select Team", list(team_options.keys()))
-    selected_team_id = team_options[selected_label]
-    st.session_state["active_team"] = selected_team_id
+    # Team selector
+    if teams:
+        team_options = {v["emoji"] + " " + v["name"]: k for k, v in teams.items()}
+        selected_label = st.selectbox("Select Team", list(team_options.keys()))
+        selected_team_id = team_options[selected_label]
+        st.session_state["active_team"] = selected_team_id
+    else:
+        st.warning("No teams found. Check data/teams.csv.")
 
     st.markdown("---")
     st.markdown(
@@ -70,7 +75,10 @@ render_ticker_strip(strip_data)
 
 # ── Always-on news banner ─────────────────────────────────────────────────────
 events_df = load_events()
-active_events = events_df[events_df["active"] == True] if not events_df.empty else events_df
+if not events_df.empty and "active" in events_df.columns:
+    active_events = events_df[events_df["active"] == True]
+else:
+    active_events = pd.DataFrame()
 render_news_banner(active_events)
 
 # ── Route to pages ────────────────────────────────────────────────────────────
