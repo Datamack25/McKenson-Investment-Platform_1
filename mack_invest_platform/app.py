@@ -24,14 +24,15 @@ inject_css()
 
 # ── Sidebar navigation ────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("""
-    <div style="text-align:center;padding:10px 0 20px;">
-        <div style="font-family:Rajdhani,sans-serif;font-size:1.5rem;font-weight:700;
-                    letter-spacing:0.15em;color:#00d4ff;">ESLSCA</div>
-        <div style="font-family:Share Tech Mono,monospace;font-size:0.7rem;color:#7c3aed;
-                    letter-spacing:0.2em;">STOCK MARKET GAME</div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        '<div style="text-align:center;padding:10px 0 20px;">'
+        '<div style="font-family:Rajdhani,sans-serif;font-size:1.5rem;font-weight:700;'
+        'letter-spacing:0.15em;color:#00d4ff;">ESLSCA</div>'
+        '<div style="font-family:Share Tech Mono,monospace;font-size:0.7rem;color:#7c3aed;'
+        'letter-spacing:0.2em;">STOCK MARKET GAME</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
     state = get_or_init_state()
     teams = state.get("teams", {})
@@ -58,7 +59,7 @@ with st.sidebar:
         selected_team_id = team_options[selected_label]
         st.session_state["active_team"] = selected_team_id
     else:
-        st.warning("No teams found. Check data/teams.csv.")
+        st.warning("No teams found. Use Admin Panel to add teams.")
 
     st.markdown("---")
     st.markdown(
