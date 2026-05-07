@@ -1,5 +1,5 @@
 """
-Market Events page: view active events, impact simulation.
+Market Events page: active alerts + price impact simulator with live prices.
 """
 import streamlit as st
 import pandas as pd
@@ -15,138 +15,100 @@ def render():
         unsafe_allow_html=True,
     )
 
-    # ── CSS animation pour les bandeaux défilants ──
-    st.markdown("""
-    <style>
-    @keyframes marquee {
-        0%   { transform: translateX(0); }
-        100% { transform: translateX(-50%); }
-    }
-    .ticker-container {
-        background: rgba(0, 0, 0, 0.35);
-        overflow: hidden;
-        white-space: nowrap;
-        padding: 9px 0;
-        border-top: 1px solid #ff3b6b;
-        border-bottom: 1px solid #ff3b6b;
-        margin-bottom: 18px;
-    }
-    .ticker-container.prices {
-        border-color: #00d4ff;
-    }
-    .ticker-wrapper {
-        display: inline-block;
-        animation: marquee 35s linear infinite;
-    }
-    .ticker-item {
-        display: inline-block;
-        padding: 0 28px;
-        font-family: 'Share Tech Mono', monospace;
-        font-size: 0.82rem;
-    }
-    .ticker-sep {
-        color: #475569;
-        padding: 0 6px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
     events_df = load_events()
-    assets_df = load_assets()
 
-    # ── BANDEAU 1 : PRIX DES ACTIFS (défilant) ──
-    st.markdown(
-        '<div style="font-family:Rajdhani,sans-serif;font-size:0.75rem;'
-        'letter-spacing:0.12em;color:#00d4ff;margin-bottom:4px;">⚙ LIVE ASSET PRICES</div>',
-        unsafe_allow_html=True,
-    )
-    price_items = ""
-    for _, asset in assets_df.iterrows():
-        ticker = asset["ticker"]
-        price = get_price(ticker)
-        if price == price:  # not NaN
-            price_items += (
-                f'<span class="ticker-item">'
-                f'<span style="color:#94a3b8;">{ticker}</span> '
-                f'<b style="color:#ffffff;">{price:,.4f}</b>'
-                f'</span>'
-                f'<span class="ticker-sep">|</span>'
-            )
-        else:
-            price_items += (
-                f'<span class="ticker-item">'
-                f'<span style="color:#94a3b8;">{ticker}</span> '
-                f'<b style="color:#475569;">N/A</b>'
-                f'</span>'
-                f'<span class="ticker-sep">|</span>'
-            )
-    # Doubler le contenu pour un défilement infini sans blanc
-    price_html = (
-        f'<div class="ticker-container prices">'
-        f'<div class="ticker-wrapper">{price_items}{price_items}</div>'
-        f'</div>'
-    )
-    st.markdown(price_html, unsafe_allow_html=True)
+    # ── Active events cards ───────────────────────────────────────────────────
+    section_title("ACTIVE MARKET ALERTS")
 
-    # ── BANDEAU 2 : NEWS / ALERTES ACTIVES (défilant) ──
-    active = events_df[events_df["active"] == True] if "active" in events_df.columns else events_df
+    if not events_df.empty and "active" in events_df.columns:
+        active = events_df[events_df["active"] == True]
+    else:
+        active = pd.DataFrame()
 
-    st.markdown(
-        '<div style="font-family:Rajdhani,sans-serif;font-size:0.75rem;'
-        'letter-spacing:0.12em;color:#ff8c00;margin-bottom:4px;">⚡ LIVE NEWS FEED</div>',
-        unsafe_allow_html=True,
-    )
     if not active.empty:
-        news_items = ""
         for _, row in active.iterrows():
-            move = float(str(row.get("move", "0")).replace("+", ""))
+            try:
+                move = float(str(row.get("move", "0")).replace("+", "").replace("%", ""))
+            except ValueError:
+                move = 0.0
             color = "#00ff88" if move >= 0 else "#ff3b6b"
             arrow = "▲" if move >= 0 else "▼"
-            news_items += (
-                f'<span class="ticker-item">'
-                f'<span style="color:#ff8c00;font-weight:bold;">⚡ ALERT</span> '
-                f'<span style="color:#e2e8f0;">{row["headline"]}</span> '
-                f'<span style="color:#94a3b8;">({row["scope"]})</span> '
-                f'<span style="color:{color};">{arrow} {abs(move)*100:.1f}%</span>'
-                f'</span>'
-                f'<span class="ticker-sep">◆</span>'
+            st.markdown(
+                f'<div style="background:rgba(255,59,107,0.08);border-left:3px solid #ff3b6b;'
+                f'border-radius:6px;padding:12px 16px;margin:6px 0;'
+                f'font-family:Share Tech Mono,monospace;font-size:0.83rem;">'
+                f'<span style="color:#ff8c00;font-weight:bold;">⚡ ALERT</span>&nbsp;&nbsp;'
+                f'<b style="color:#e2e8f0;">{row.get("headline","")}</b><br>'
+                f'<span style="color:#94a3b8;">'
+                f'Scope: <b style="color:#00d4ff;">{row.get("scope","")}</b>'
+                f'&nbsp;|&nbsp;Move: <b style="color:{color};">{arrow} {abs(move)*100:.0f} bps</b>'
+                f'&nbsp;|&nbsp;{str(row.get("start_dt",""))[:16]} → {str(row.get("end_dt",""))[:16]}'
+                f'</span></div>',
+                unsafe_allow_html=True,
             )
-        news_html = (
-            f'<div class="ticker-container" style="border-color:#ff8c00;">'
-            f'<div class="ticker-wrapper" style="animation-duration:40s;">'
-            f'{news_items}{news_items}'
-            f'</div></div>'
-        )
-        st.markdown(news_html, unsafe_allow_html=True)
     else:
         st.info("No active market events.")
 
-    # ── All events table ──
+    # ── All events table ──────────────────────────────────────────────────────
     section_title("ALL EVENTS LOG")
-    st.dataframe(events_df, use_container_width=True, hide_index=True)
+    if not events_df.empty:
+        st.dataframe(events_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No events data found. Check data/events.csv.")
 
-    # ── Impact simulation ──
+    # ── Impact simulator ──────────────────────────────────────────────────────
     section_title("PRICE IMPACT SIMULATOR")
     st.markdown(
-        '<div style="font-family:Share Tech Mono;font-size:0.78rem;color:#94a3b8;">'
-        'Simulate the hypothetical price impact of an event on an asset.</div>',
+        '<div style="font-family:Share Tech Mono;font-size:0.78rem;color:#94a3b8;margin-bottom:12px;">'
+        'Simulate the hypothetical price impact of a shock on any asset — prices are fetched live.</div>',
         unsafe_allow_html=True,
     )
 
+    assets_df = load_assets()
+    if assets_df.empty:
+        st.warning("No assets configured.")
+        return
+
     col1, col2 = st.columns(2)
     with col1:
-        sim_ticker = st.selectbox("Asset", assets_df["ticker"].tolist(), key="sim_t")
-        sim_move = st.slider("Price shock (%)", -30.0, 30.0, -10.0, 0.5)
+        sim_ticker = st.selectbox("Select Asset", assets_df["ticker"].tolist(), key="sim_ticker")
+        sim_move   = st.slider("Price Shock (%)", -50.0, 50.0, -10.0, 0.5, key="sim_move")
+
     with col2:
         spot = get_price(sim_ticker)
-        if spot == spot:
-            new_price = spot * (1 + sim_move / 100)
-            st.metric("Current Price", f"{spot:,.4f}")
-            st.metric(
-                "Shocked Price",
-                f"{new_price:,.4f}",
-                delta=f"{sim_move:+.1f}%",
-                delta_color="normal",
+
+        if spot == spot:  # not NaN
+            new_price  = spot * (1 + sim_move / 100)
+            pnl_color  = "normal"
+
+            st.markdown(
+                f'<div style="background:rgba(0,212,255,0.06);border:1px solid rgba(0,212,255,0.2);'
+                f'border-radius:8px;padding:16px;font-family:Share Tech Mono,monospace;">'
+                f'<div style="color:#94a3b8;font-size:0.72rem;letter-spacing:0.1em;margin-bottom:4px;">CURRENT PRICE (LIVE)</div>'
+                f'<div style="color:#e2e8f0;font-size:1.4rem;font-weight:bold;">{spot:,.4f}</div>'
+                f'<div style="color:#94a3b8;font-size:0.72rem;letter-spacing:0.1em;margin:12px 0 4px;">SHOCKED PRICE</div>'
+                f'<div style="color:{"#00ff88" if sim_move >= 0 else "#ff3b6b"};font-size:1.4rem;font-weight:bold;">'
+                f'{new_price:,.4f} '
+                f'<span style="font-size:0.9rem;">({sim_move:+.1f}%)</span>'
+                f'</div>'
+                f'</div>',
+                unsafe_allow_html=True,
             )
+
+            # Simple gauge chart
+            fig = go.Figure(go.Indicator(
+                mode="number+delta",
+                value=new_price,
+                delta={"reference": spot, "relative": True, "valueformat": ".2%"},
+                title={"text": f"{sim_ticker} — Shocked Price", "font": {"color": "#94a3b8", "size": 13}},
+                number={"font": {"color": "#00d4ff", "size": 28}},
+            ))
+            fig.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                height=160,
+                margin=dict(t=20, b=10, l=10, r=10),
+                font={"color": "#e2e8f0"},
+            )
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            st.warning("Could not fetch live price for this asset.")
+            st.error(f"Could not fetch live price for {sim_ticker}. Check the ticker symbol or your connection.")
