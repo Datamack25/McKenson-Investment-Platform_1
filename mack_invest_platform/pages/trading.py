@@ -2,6 +2,7 @@
 """
 Spot trading (BUY/SELL) + European Options with Black-Scholes pricing,
 full Greeks, and order ticket.
+FIXED: fig.add_fill replaced with correct go.Scatter fill trace.
 """
 from __future__ import annotations
 import math
@@ -166,7 +167,6 @@ def _spot_trading(port, state, team_id, port_id):
             f'Cash dispo: ${cash:,.0f} | Position: {current_qty:,.4f}</div>'
             f'</div>', unsafe_allow_html=True)
 
-    btn_color = "#00ff88" if action == "BUY" else "#ff3b6b"
     btn_label = f"{'🟢 ACHETER' if action=='BUY' else '🔴 VENDRE'} {qty_input:,.4f} {ticker} @ ${price:,.4f}"
 
     if st.button(btn_label, key="tr_exec", use_container_width=True):
@@ -207,7 +207,7 @@ def _options_desk(port, state, team_id, port_id):
     </div>""", unsafe_allow_html=True)
 
     assets_df = load_assets()
-    # Only tradeable spot underlyings (no indices futures, no forex for options)
+    # Only tradeable spot underlyings
     opt_assets = assets_df[assets_df["category"].isin(["Equities", "ETF", "Crypto"])]
 
     col1, col2 = st.columns([1, 1])
@@ -240,7 +240,7 @@ def _options_desk(port, state, team_id, port_id):
         total_premium = premium * 100 * n_contracts
 
         # Moneyness
-        moneyness = price / K
+        moneyness = price / K if K > 0 else 1.0
         if abs(moneyness - 1) < 0.02:
             money_lbl, money_col = "AT THE MONEY", "#ffd700"
         elif (opt_type == "call" and moneyness > 1) or (opt_type == "put" and moneyness < 1):
@@ -299,18 +299,35 @@ def _options_desk(port, state, team_id, port_id):
         else:
             st.warning("Vol. implicite incalculable avec ces paramètres.")
 
-    # Payoff diagram
+    # ── Payoff diagram ────────────────────────────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
     section_title("DIAGRAMME DE PAYOFF À L'EXPIRATION", "📉")
     spots = np.linspace(max(price * 0.5, 0.01), price * 1.5, 300)
     leg   = [{"type": opt_type, "K": K, "qty": 1, "premium": premium}]
     pnl   = payoff_at_expiry(leg, spots)
 
+    # Split into profit/loss zones for coloring
+    pnl_pos = np.where(pnl >= 0, pnl, np.nan)
+    pnl_neg = np.where(pnl < 0,  pnl, np.nan)
+
     fig = go.Figure()
+    # Profit area (green fill)
+    fig.add_trace(go.Scatter(
+        x=spots, y=pnl_pos,
+        mode="lines", line=dict(color="rgba(0,255,136,0)", width=0),
+        fill="tozeroy", fillcolor="rgba(0,255,136,.08)",
+        showlegend=False, hoverinfo="skip"))
+    # Loss area (red fill)
+    fig.add_trace(go.Scatter(
+        x=spots, y=pnl_neg,
+        mode="lines", line=dict(color="rgba(255,59,107,0)", width=0),
+        fill="tozeroy", fillcolor="rgba(255,59,107,.08)",
+        showlegend=False, hoverinfo="skip"))
+    # Main P&L line
     fig.add_trace(go.Scatter(
         x=spots, y=pnl,
         mode="lines", line=dict(color="#00d4ff", width=2.5),
-        fill="tozeroy", fillcolor="rgba(0,212,255,.06)",
+        name="P&L",
         hovertemplate="Spot: $%{x:,.2f}<br>P&L: $%{y:,.2f}<extra></extra>"))
     fig.add_hline(y=0, line_color="rgba(255,255,255,.3)", line_dash="dot")
     fig.add_vline(x=price, line_color="#ffd700", line_dash="dash",
@@ -322,7 +339,7 @@ def _options_desk(port, state, team_id, port_id):
         yaxis=dict(title="P&L par action ($)", gridcolor="rgba(255,255,255,.04)"))
     st.plotly_chart(fig, use_container_width=True)
 
-    # Options strategy payoff
+    # ── Options strategy payoff ───────────────────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
     section_title("STRATÉGIES OPTIONS — PAYOFF MULTI-JAMBES", "🧩")
     strategy_names = list(STRATEGY_META.keys())
@@ -342,15 +359,29 @@ def _options_desk(port, state, team_id, port_id):
         f'</div>', unsafe_allow_html=True)
 
     color = meta.get("color", "#00d4ff")
+
+    pnl2_pos = np.where(pnl2 >= 0, pnl2, np.nan)
+    pnl2_neg = np.where(pnl2 < 0,  pnl2, np.nan)
+
     fig2 = go.Figure()
-    # Color positive/negative areas
-    pnl2_pos = np.where(pnl2 >= 0, pnl2, 0)
-    pnl2_neg = np.where(pnl2 < 0, pnl2, 0)
-    fig2.add_trace(go.Scatter(x=spots2, y=pnl2,
+    # Profit fill
+    fig2.add_trace(go.Scatter(
+        x=spots2, y=pnl2_pos,
+        mode="lines", line=dict(width=0, color="rgba(0,255,136,0)"),
+        fill="tozeroy", fillcolor="rgba(0,255,136,.07)",
+        showlegend=False, hoverinfo="skip"))
+    # Loss fill
+    fig2.add_trace(go.Scatter(
+        x=spots2, y=pnl2_neg,
+        mode="lines", line=dict(width=0, color="rgba(255,59,107,0)"),
+        fill="tozeroy", fillcolor="rgba(255,59,107,.07)",
+        showlegend=False, hoverinfo="skip"))
+    # Main line
+    fig2.add_trace(go.Scatter(
+        x=spots2, y=pnl2,
         mode="lines", line=dict(color=color, width=2.5),
+        name=strat_sel,
         hovertemplate="Spot: $%{x:,.2f}<br>P&L: $%{y:,.2f}<extra></extra>"))
-    fig2.add_fill = go.Scatter(x=spots2, y=pnl2_pos, fill="tozeroy",
-        fillcolor="rgba(0,255,136,.07)", line=dict(width=0), showlegend=False)
     fig2.add_hline(y=0, line_color="rgba(255,255,255,.3)")
     fig2.add_vline(x=price, line_color="#ffd700", line_dash="dash",
                    annotation_text=f"Spot ${price:,.2f}", annotation_font_color="#ffd700")
@@ -401,15 +432,7 @@ def _order_book(port):
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Styled dataframe
-    def style_action(val):
-        if val == "BUY":
-            return "color: #00ff88; font-weight: bold;"
-        elif val == "SELL":
-            return "color: #ff3b6b; font-weight: bold;"
-        return ""
-
-    # Build HTML table
+    # HTML styled table
     hdr = ["Date", "Ticker", "Action", "Quantité", "Prix", "Total"]
     th  = "".join(
         f'<th style="font-family:Rajdhani;font-size:.67rem;color:#00d4ff;'
@@ -425,9 +448,9 @@ def _order_book(port):
             f'<td style="padding:7px 10px;color:#7a93b0;font-size:.76rem;">{row.get("date","—")}</td>'
             f'<td style="padding:7px 10px;color:#00d4ff;font-weight:bold;">{row.get("ticker","—")}</td>'
             f'<td style="padding:7px 10px;color:{act_col};font-weight:bold;">{row.get("action","—")}</td>'
-            f'<td style="padding:7px 10px;">{row.get("qty",0):,.4f}</td>'
-            f'<td style="padding:7px 10px;">${row.get("price",0):,.4f}</td>'
-            f'<td style="padding:7px 10px;color:#ffd700;">${row.get("total",0):,.2f}</td>'
+            f'<td style="padding:7px 10px;">{float(row.get("qty",0)):,.4f}</td>'
+            f'<td style="padding:7px 10px;">${float(row.get("price",0)):,.4f}</td>'
+            f'<td style="padding:7px 10px;color:#ffd700;">${float(row.get("total",0)):,.2f}</td>'
             f'</tr>'
         )
 
