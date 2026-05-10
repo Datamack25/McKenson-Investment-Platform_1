@@ -1,95 +1,117 @@
+# utils/technical.py  —  MAM Technical Analysis Engine
 """
-Technical analysis: RSI, MACD, Bollinger Bands, simple GARCH volatility forecast.
+RSI, MACD, Bollinger Bands, ATR, Stochastic, VWAP, GARCH (simplified).
 """
+from __future__ import annotations
 import numpy as np
 import pandas as pd
 
 
-# ── RSI ───────────────────────────────────────────────────────────────────────
-
-def compute_rsi(prices: pd.Series, period=14) -> pd.Series:
-    delta = prices.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
-    avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    delta = close.diff()
+    gain  = delta.clip(lower=0)
+    loss  = (-delta).clip(lower=0)
+    avg_g = gain.ewm(com=period - 1, min_periods=period).mean()
+    avg_l = loss.ewm(com=period - 1, min_periods=period).mean()
+    rs    = avg_g / avg_l.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
 
 
-# ── MACD ──────────────────────────────────────────────────────────────────────
-
-def compute_macd(prices: pd.Series, fast=12, slow=26, signal=9) -> pd.DataFrame:
-    ema_fast = prices.ewm(span=fast, adjust=False).mean()
-    ema_slow = prices.ewm(span=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
+def compute_macd(close: pd.Series,
+                 fast: int = 12, slow: int = 26, signal: int = 9
+                 ) -> tuple[pd.Series, pd.Series, pd.Series]:
+    ema_fast   = close.ewm(span=fast, adjust=False).mean()
+    ema_slow   = close.ewm(span=slow, adjust=False).mean()
+    macd_line  = ema_fast - ema_slow
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return pd.DataFrame({
-        "MACD": macd_line,
-        "Signal": signal_line,
-        "Histogram": histogram
-    })
+    histogram  = macd_line - signal_line
+    return macd_line, signal_line, histogram
 
 
-# ── Bollinger Bands ────────────────────────────────────────────────────────────
-
-def compute_bollinger(prices: pd.Series, window=20, num_std=2) -> pd.DataFrame:
-    sma = prices.rolling(window).mean()
-    std = prices.rolling(window).std()
-    upper = sma + num_std * std
-    lower = sma - num_std * std
-    pct_b = (prices - lower) / (upper - lower)
-    bandwidth = (upper - lower) / sma
-    return pd.DataFrame({
-        "SMA": sma,
-        "Upper": upper,
-        "Lower": lower,
-        "%B": pct_b,
-        "Bandwidth": bandwidth,
-    })
+def compute_bollinger(close: pd.Series,
+                      period: int = 20, n_std: float = 2.0
+                      ) -> tuple[pd.Series, pd.Series, pd.Series]:
+    sma    = close.rolling(period).mean()
+    std    = close.rolling(period).std()
+    upper  = sma + n_std * std
+    lower  = sma - n_std * std
+    return upper, sma, lower
 
 
-# ── Simple volatility forecast (EWMA/GARCH-like) ─────────────────────────────
+def compute_atr(high: pd.Series, low: pd.Series,
+                close: pd.Series, period: int = 14) -> pd.Series:
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low  - close.shift()).abs(),
+    ], axis=1).max(axis=1)
+    return tr.ewm(com=period - 1, min_periods=period).mean()
 
-def garch_vol_forecast(returns: pd.Series, omega=1e-6, alpha=0.09,
-                       beta=0.90, horizon=10) -> list:
+
+def compute_stochastic(high: pd.Series, low: pd.Series,
+                       close: pd.Series,
+                       k_period: int = 14, d_period: int = 3
+                       ) -> tuple[pd.Series, pd.Series]:
+    lowest_low   = low.rolling(k_period).min()
+    highest_high = high.rolling(k_period).max()
+    k = 100 * (close - lowest_low) / (highest_high - lowest_low + 1e-12)
+    d = k.rolling(d_period).mean()
+    return k, d
+
+
+def compute_vwap(high: pd.Series, low: pd.Series,
+                 close: pd.Series, volume: pd.Series) -> pd.Series:
+    typical = (high + low + close) / 3
+    cum_tp_vol = (typical * volume).cumsum()
+    cum_vol    = volume.cumsum()
+    return cum_tp_vol / cum_vol.replace(0, np.nan)
+
+
+def compute_ema(close: pd.Series, period: int) -> pd.Series:
+    return close.ewm(span=period, adjust=False).mean()
+
+
+def compute_sma(close: pd.Series, period: int) -> pd.Series:
+    return close.rolling(period).mean()
+
+
+def garch_vol_estimate(returns: pd.Series,
+                       omega: float = 1e-6,
+                       alpha: float = 0.10,
+                       beta:  float = 0.85) -> pd.Series:
     """
-    Simple GARCH(1,1)-style multi-step variance forecast.
-    Returns list of annualised vol estimates for each step.
+    Simplified GARCH(1,1) conditional variance estimate.
+    σ²_t = ω + α·ε²_{t-1} + β·σ²_{t-1}
     """
-    var_long = returns.var()
-    # initialise with last EWMA var
-    sq = returns**2
-    current_var = sq.ewm(span=20).mean().iloc[-1]
-    forecasts = []
-    for h in range(1, horizon + 1):
-        current_var = omega + (alpha + beta) * current_var
-        # mean-revert toward long-run variance
-        current_var = omega / (1 - alpha - beta) + (alpha + beta)**h * (current_var - omega / (1 - alpha - beta))
-        forecasts.append(np.sqrt(current_var * 252))
-    return forecasts
+    r   = returns.dropna().values
+    n   = len(r)
+    h   = np.zeros(n)
+    h[0] = np.var(r)
+    for t in range(1, n):
+        h[t] = omega + alpha * r[t - 1] ** 2 + beta * h[t - 1]
+    vol = pd.Series(np.sqrt(h) * np.sqrt(252),
+                    index=returns.dropna().index,
+                    name="GARCH_vol")
+    return vol
 
 
-# ── Candlestick signal summary ─────────────────────────────────────────────────
+def get_signal(rsi: float, macd_hist: float,
+               price: float, bb_upper: float, bb_lower: float) -> tuple[str, str]:
+    """Simple composite signal based on RSI + MACD + BB."""
+    score = 0
+    if rsi < 30:  score += 2
+    elif rsi < 45: score += 1
+    elif rsi > 70: score -= 2
+    elif rsi > 55: score -= 1
 
-def signal_summary(prices: pd.Series) -> dict:
-    """Quick signal table from RSI, MACD, Bollinger."""
-    rsi = compute_rsi(prices).iloc[-1]
-    macd_df = compute_macd(prices)
-    boll = compute_bollinger(prices)
+    if macd_hist > 0:  score += 1
+    elif macd_hist < 0: score -= 1
 
-    macd_signal = "BUY" if macd_df["MACD"].iloc[-1] > macd_df["Signal"].iloc[-1] else "SELL"
-    rsi_signal = "OVERSOLD" if rsi < 30 else ("OVERBOUGHT" if rsi > 70 else "NEUTRAL")
-    pct_b = boll["%B"].iloc[-1]
-    bb_signal = "OVERSOLD" if pct_b < 0 else ("OVERBOUGHT" if pct_b > 1 else "NEUTRAL")
+    if price < bb_lower:  score += 1
+    elif price > bb_upper: score -= 1
 
-    return {
-        "RSI": round(rsi, 2),
-        "RSI_signal": rsi_signal,
-        "MACD_signal": macd_signal,
-        "MACD_hist": round(macd_df["Histogram"].iloc[-1], 4),
-        "BB_%B": round(pct_b, 3),
-        "BB_signal": bb_signal,
-    }
+    if score >= 3:    return "STRONG BUY",  "positive"
+    elif score >= 1:  return "BUY",         "positive"
+    elif score <= -3: return "STRONG SELL", "negative"
+    elif score <= -1: return "SELL",        "negative"
+    return "NEUTRAL", "neutral"
