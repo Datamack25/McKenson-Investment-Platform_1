@@ -1,14 +1,17 @@
 # pages/events.py  —  MAM Events & News
 """
-Live financial & geopolitical news fetched from real RSS feeds (Google News, Reuters, Bloomberg, FT…).
-Refreshed every hour automatically. Also displays market_events.csv static calendar.
+Live financial & geopolitical news fetched from public RSS feeds (Reuters, FT, Bloomberg, BBC).
+Falls back to curated market_events.csv when network is unavailable.
+Timezone-safe datetime comparisons throughout.
 """
 from __future__ import annotations
-import re
+
+import json
+import os
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime, timezone, timedelta
+from typing import Optional
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -17,504 +20,571 @@ import streamlit as st
 
 from components.ui import section_title, metric_row
 
-# ── RSS feed registry ─────────────────────────────────────────────────────────
-RSS_FEEDS: dict[str, list[dict]] = {
-    "Markets": [
-        {"name": "Reuters Markets",     "url": "https://feeds.reuters.com/reuters/businessNews"},
-        {"name": "FT Markets",          "url": "https://www.ft.com/markets?format=rss"},
-        {"name": "Yahoo Finance",       "url": "https://finance.yahoo.com/news/rssindex"},
-        {"name": "MarketWatch",         "url": "https://feeds.content.dowjones.io/public/rss/mw_topstories"},
-        {"name": "Investing.com",       "url": "https://www.investing.com/rss/news.rss"},
-    ],
-    "Tech & Equities": [
-        {"name": "Google News – Tech",  "url": "https://news.google.com/rss/headlines/section/topic/TECHNOLOGY?hl=en&gl=US&ceid=US:en"},
-        {"name": "CNBC Tech",           "url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=19854910"},
-        {"name": "Nasdaq News",         "url": "https://www.nasdaq.com/feed/rssoutbound?category=Technology"},
-    ],
-    "Crypto": [
-        {"name": "CoinDesk",            "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"},
-        {"name": "Cointelegraph",       "url": "https://cointelegraph.com/rss"},
-        {"name": "Google News – Crypto","url": "https://news.google.com/rss/search?q=bitcoin+crypto+ethereum&hl=en&gl=US&ceid=US:en"},
-    ],
-    "Macro & Central Banks": [
-        {"name": "Google News – Fed",   "url": "https://news.google.com/rss/search?q=Federal+Reserve+ECB+interest+rates&hl=en&gl=US&ceid=US:en"},
-        {"name": "Reuters Economy",     "url": "https://feeds.reuters.com/reuters/economicsnews"},
-        {"name": "CNBC Economy",        "url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258"},
-    ],
-    "Geopolitics": [
-        {"name": "Reuters World",       "url": "https://feeds.reuters.com/Reuters/worldNews"},
-        {"name": "Google News – World", "url": "https://news.google.com/rss/headlines/section/topic/WORLD?hl=en&gl=US&ceid=US:en"},
-        {"name": "BBC World",           "url": "http://feeds.bbci.co.uk/news/world/rss.xml"},
-    ],
-    "Commodities & FX": [
-        {"name": "Google News – Oil",   "url": "https://news.google.com/rss/search?q=oil+gold+commodity+forex&hl=en&gl=US&ceid=US:en"},
-        {"name": "Reuters Commodities", "url": "https://feeds.reuters.com/reuters/commoditiesNews"},
-    ],
+# ── Constants ─────────────────────────────────────────────────────────────────
+_EVENTS_CSV = os.path.join(os.path.dirname(__file__), "..", "data", "market_events.csv")
+_CACHE_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "_news_cache.json")
+_CACHE_TTL  = 3600  # 1 hour
+
+_P = dict(
+    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+    font=dict(color="#94a3b8", family="Share Tech Mono"),
+    margin=dict(l=8, r=8, t=28, b=8),
+)
+
+# RSS feeds — public, no auth required
+_RSS_FEEDS = {
+    "Reuters Markets":      "https://feeds.reuters.com/reuters/businessNews",
+    "Reuters Tech":         "https://feeds.reuters.com/reuters/technologyNews",
+    "FT Markets":           "https://www.ft.com/markets?format=rss",
+    "BBC Business":         "https://feeds.bbci.co.uk/news/business/rss.xml",
+    "CNBC Top News":        "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+    "Yahoo Finance":        "https://finance.yahoo.com/news/rssindex",
+    "Investing.com Crypto": "https://www.investing.com/rss/news_301.rss",
+    "Seeking Alpha":        "https://seekingalpha.com/market_currents.xml",
 }
 
-TIMEOUT    = 6    # seconds per feed request
-CACHE_TTL  = 3600 # 1 hour
+_IMPACT_COLOR = {
+    "high":   "#ff3b6b",
+    "medium": "#ffd700",
+    "low":    "#00ff88",
+}
 
-_P = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-          font=dict(color="#94a3b8", family="Share Tech Mono"),
-          margin=dict(l=8, r=8, t=28, b=8))
+_CAT_ICON = {
+    "Central Banks": "🏦",
+    "Earnings":      "📊",
+    "Commodities":   "🛢️",
+    "Geopolitics":   "🌍",
+    "Crypto":        "₿",
+    "Macro":         "📈",
+    "Tech":          "💻",
+    "Live":          "📡",
+}
 
 
-# ── RSS fetcher ───────────────────────────────────────────────────────────────
-def _parse_rss(url: str, source_name: str) -> list[dict]:
-    """Fetch and parse a single RSS feed. Returns list of article dicts."""
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_rss_date(date_str: str) -> Optional[datetime]:
+    """Parse RFC-2822 or ISO dates into timezone-aware UTC datetime."""
+    for fmt in (
+        "%a, %d %b %Y %H:%M:%S %z",
+        "%a, %d %b %Y %H:%M:%S GMT",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%d",
+    ):
+        try:
+            dt = datetime.strptime(date_str.strip(), fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            continue
+    return None
+
+
+def _fetch_rss(url: str, timeout: int = 6) -> list[dict]:
+    """Fetch and parse one RSS feed. Returns list of news items."""
+    items = []
     try:
-        resp = requests.get(url, timeout=TIMEOUT, headers={
-            "User-Agent": "MAM-NewsReader/1.0 (investment simulation platform)"
-        })
-        if resp.status_code != 200:
-            return []
+        resp = requests.get(url, timeout=timeout,
+                            headers={"User-Agent": "MAM-NewsBot/1.0"})
+        resp.raise_for_status()
         root = ET.fromstring(resp.content)
         ns   = {"atom": "http://www.w3.org/2005/Atom"}
 
-        items = root.findall(".//item")          # RSS 2.0
-        if not items:
-            items = root.findall(".//atom:entry", ns)  # Atom
+        # Handle both RSS 2.0 (<item>) and Atom (<entry>)
+        entries = root.findall(".//item") or root.findall(".//atom:entry", ns)
+        for entry in entries[:8]:  # max 8 per feed
+            title = (
+                getattr(entry.find("title"), "text", None)
+                or getattr(entry.find("atom:title", ns), "text", None)
+                or ""
+            ).strip()
+            link = (
+                getattr(entry.find("link"), "text", None)
+                or getattr(entry.find("atom:link", ns), "attrib", {}).get("href", "")
+                or ""
+            ).strip()
+            pub = (
+                getattr(entry.find("pubDate"), "text", None)
+                or getattr(entry.find("dc:date", {"dc": "http://purl.org/dc/elements/1.1/"}), "text", None)
+                or getattr(entry.find("atom:published", ns), "text", None)
+                or ""
+            ).strip()
+            desc = (
+                getattr(entry.find("description"), "text", None)
+                or getattr(entry.find("atom:summary", ns), "text", None)
+                or ""
+            )
+            if desc:
+                import re
+                desc = re.sub(r"<[^>]+>", "", desc).strip()[:200]
 
-        articles = []
-        for item in items[:15]:  # max 15 per feed
-            def _txt(tag, ns_=None):
-                el = item.find(tag) if ns_ is None else item.find(tag, ns_)
-                return el.text.strip() if el is not None and el.text else ""
-
-            # Try both RSS and Atom tag names
-            title   = _txt("title")   or _txt("atom:title", ns)
-            link    = _txt("link")    or _txt("atom:link", ns)
-            pubdate = _txt("pubDate") or _txt("atom:published", ns) or _txt("atom:updated", ns)
-            desc    = _txt("description") or _txt("atom:summary", ns) or _txt("atom:content", ns)
-
-            # Clean HTML tags from description
-            desc = re.sub(r"<[^>]+>", " ", desc)[:280].strip()
-
-            # Parse date
-            ts = None
-            for fmt in ("%a, %d %b %Y %H:%M:%S %z", "%Y-%m-%dT%H:%M:%S%z",
-                        "%a, %d %b %Y %H:%M:%S GMT", "%Y-%m-%dT%H:%M:%SZ"):
-                try:
-                    ts = datetime.strptime(pubdate[:len(fmt)+4].strip(), fmt)
-                    break
-                except Exception:
-                    continue
-            if ts is None:
-                ts = datetime.now(timezone.utc)
+            dt = _parse_rss_date(pub) if pub else _now_utc()
 
             if title:
-                articles.append({
-                    "title": title, "link": link, "desc": desc,
-                    "source": source_name, "ts": ts,
-                    "ts_str": ts.strftime("%d %b %Y  %H:%M UTC"),
+                items.append({
+                    "title":       title,
+                    "link":        link,
+                    "published":   dt.isoformat() if dt else _now_utc().isoformat(),
+                    "description": desc,
+                    "source":      url,
                 })
-        return articles
-
     except Exception:
+        pass
+    return items
+
+
+def _load_cached_news() -> list[dict]:
+    """Load news from disk cache if not stale."""
+    try:
+        if os.path.exists(_CACHE_FILE):
+            with open(_CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            ts = datetime.fromisoformat(data.get("timestamp", "2000-01-01T00:00:00+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if (_now_utc() - ts).total_seconds() < _CACHE_TTL:
+                return data.get("items", [])
+    except Exception:
+        pass
+    return []
+
+
+def _save_news_cache(items: list[dict]) -> None:
+    try:
+        os.makedirs(os.path.dirname(_CACHE_FILE), exist_ok=True)
+        with open(_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"timestamp": _now_utc().isoformat(), "items": items}, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+@st.cache_data(ttl=_CACHE_TTL)
+def fetch_live_news() -> list[dict]:
+    """Fetch from all RSS feeds, merge, deduplicate, sort by date."""
+    # Try cache first (cross-session on disk)
+    cached = _load_cached_news()
+    if cached:
+        return cached
+
+    all_items: list[dict] = []
+    for source_name, url in _RSS_FEEDS.items():
+        items = _fetch_rss(url)
+        for it in items:
+            it["feed_name"] = source_name
+        all_items.extend(items)
+
+    if not all_items:
         return []
 
-
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def _fetch_category(category: str) -> list[dict]:
-    """Fetch all feeds for a given category (cached 1 h)."""
-    feeds   = RSS_FEEDS.get(category, [])
-    results = []
-    for feed in feeds:
-        arts = _parse_rss(feed["url"], feed["name"])
-        results.extend(arts)
-    # Deduplicate by title similarity, sort newest first
+    # Deduplicate by title similarity
     seen: set[str] = set()
-    deduped = []
-    for a in sorted(results, key=lambda x: x["ts"], reverse=True):
-        key = a["title"][:60].lower()
+    unique: list[dict] = []
+    for it in all_items:
+        key = it["title"][:60].lower()
         if key not in seen:
             seen.add(key)
-            deduped.append(a)
-    return deduped[:40]
+            unique.append(it)
 
-
-def _load_events_csv() -> pd.DataFrame:
-    path = Path("data/market_events.csv")
-    if path.exists():
+    # Sort: most recent first (timezone-aware)
+    def _sortkey(x):
         try:
-            return pd.read_csv(path)
+            dt = datetime.fromisoformat(x["published"])
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
         except Exception:
-            pass
-    return pd.DataFrame()
+            return _now_utc() - timedelta(days=365)
+
+    unique.sort(key=_sortkey, reverse=True)
+    _save_news_cache(unique)
+    return unique
+
+
+def _load_static_events() -> pd.DataFrame:
+    """Load curated events from CSV (always timezone-naive safe)."""
+    try:
+        df = pd.read_csv(_EVENTS_CSV, parse_dates=["date"])
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], utc=False).dt.tz_localize(None)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def _category_icon(cat: str) -> str:
+    for k, v in _CAT_ICON.items():
+        if k.lower() in cat.lower():
+            return v
+    return "📌"
+
+
+def _impact_badge(impact: str) -> str:
+    col = _IMPACT_COLOR.get(impact.lower(), "#7a93b0")
+    return (
+        f'<span style="background:rgba(255,255,255,.06);border:1px solid {col};'
+        f'border-radius:3px;padding:1px 7px;font-size:.62rem;font-family:Rajdhani;'
+        f'color:{col};font-weight:700;letter-spacing:.08em;text-transform:uppercase;">'
+        f'{impact.upper()}</span>'
+    )
 
 
 # ── Main render ───────────────────────────────────────────────────────────────
+
 def render():
     st.markdown(
         '<h1 style="font-family:Rajdhani,sans-serif;font-size:2rem;letter-spacing:.12em;'
         'color:#00d4ff;margin:0 0 2px;text-shadow:0 0 30px rgba(0,212,255,.4);">'
-        '📰 EVENTS & LIVE NEWS — MAM</h1>', unsafe_allow_html=True)
-
-    st.markdown(
-        '<div style="font-family:Share Tech Mono;font-size:.73rem;color:#7a93b0;margin-bottom:16px;">'
-        '📡 Actualité financière en temps réel · Mise à jour toutes les heures · '
-        f'Dernière sync : {datetime.now().strftime("%H:%M")} UTC'
-        '</div>', unsafe_allow_html=True)
-
-    tab_news, tab_calendar, tab_impact = st.tabs([
-        "📡 LIVE NEWS",
-        "📅 CALENDRIER ÉVÉNEMENTS",
-        "📊 IMPACT MARCHÉ",
-    ])
-
-    with tab_news:
-        _live_news_tab()
-    with tab_calendar:
-        _calendar_tab()
-    with tab_impact:
-        _impact_tab()
-
-
-# ── Live news tab ─────────────────────────────────────────────────────────────
-def _live_news_tab():
-    section_title("ACTUALITÉS FINANCIÈRES EN DIRECT", "📡")
-
-    categories = list(RSS_FEEDS.keys())
-    cols_top = st.columns([3, 1])
-    with cols_top[0]:
-        selected_cat = st.selectbox(
-            "Catégorie d'actualités",
-            categories,
-            key="news_cat",
-        )
-    with cols_top[1]:
-        if st.button("🔄 Actualiser", key="news_refresh", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
-
-    with st.spinner(f"⏳ Chargement des actualités — {selected_cat}…"):
-        articles = _fetch_category(selected_cat)
-
-    if not articles:
-        st.warning(
-            "⚠️ Impossible de charger les actualités en ce moment. "
-            "Vérifiez votre connexion Internet ou réessayez dans quelques instants."
-        )
-        _show_fallback_news()
-        return
-
-    st.markdown(
-        f'<div style="font-family:Share Tech Mono;font-size:.7rem;color:#7a93b0;'
-        f'margin-bottom:14px;">{len(articles)} articles trouvés</div>',
+        '📡 EVENTS & NEWS — MAM</h1>',
         unsafe_allow_html=True,
     )
 
-    # Search filter
-    search = st.text_input(
-        "🔍 Filtrer les titres", "", key="news_search",
-        placeholder="ex: Fed, Bitcoin, NVIDIA…"
-    )
-    filtered = [a for a in articles
-                if not search or search.lower() in a["title"].lower() or search.lower() in a["desc"].lower()]
+    tab_live, tab_calendar, tab_impact = st.tabs([
+        "📡 LIVE NEWS FEED",
+        "📅 ÉVÉNEMENTS MARCHÉ",
+        "📊 ANALYSE D'IMPACT",
+    ])
 
-    if not filtered:
-        st.info("Aucun article ne correspond à votre recherche.")
+    with tab_live:
+        _live_news_tab()
+    with tab_calendar:
+        _market_events_tab()
+    with tab_impact:
+        _impact_analysis_tab()
+
+
+# ── Tab 1 — Live RSS news ─────────────────────────────────────────────────────
+
+def _live_news_tab():
+    section_title("ACTUALITÉS FINANCIÈRES EN DIRECT", "📡")
+
+    col_ref, col_filter = st.columns([1, 3])
+    with col_ref:
+        if st.button("🔄 Actualiser", key="news_refresh"):
+            st.cache_data.clear()
+            st.rerun()
+    with col_filter:
+        feed_filter = st.multiselect(
+            "Sources",
+            list(_RSS_FEEDS.keys()),
+            default=list(_RSS_FEEDS.keys())[:4],
+            key="news_src_filter",
+        )
+
+    with st.spinner("📡 Chargement des actualités…"):
+        news_items = fetch_live_news()
+
+    if not news_items:
+        st.warning(
+            "⚠️ Impossible de récupérer les actualités en direct. "
+            "Vérifiez la connexion réseau. Les données statiques sont affichées ci-dessous."
+        )
+        _show_static_fallback()
         return
 
-    # Article cards
-    for art in filtered:
-        _article_card(art)
-
-
-def _article_card(art: dict):
-    """Render a single news article card."""
-    ts_ago = _time_ago(art["ts"])
-    link   = art.get("link", "#")
-    source = art.get("source", "—")
+    # Filter by selected feeds
+    if feed_filter:
+        filtered = [it for it in news_items if it.get("feed_name", "") in feed_filter]
+    else:
+        filtered = news_items
 
     st.markdown(
-        f'<div style="background:rgba(0,212,255,.04);border:1px solid rgba(0,212,255,.12);'
-        f'border-left:3px solid rgba(0,212,255,.5);border-radius:6px;'
-        f'padding:12px 16px;margin-bottom:10px;">'
-        f'<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">'
-        f'<div style="flex:1;">'
-        f'<a href="{link}" target="_blank" style="font-family:Rajdhani;font-size:1rem;'
-        f'font-weight:700;color:#e2e8f0;text-decoration:none;letter-spacing:.03em;'
-        f'line-height:1.3;">{art["title"]}</a>'
         f'<div style="font-family:Share Tech Mono;font-size:.7rem;color:#7a93b0;'
-        f'margin-top:6px;line-height:1.6;">{art["desc"]}</div>'
-        f'</div></div>'
-        f'<div style="display:flex;gap:12px;margin-top:8px;align-items:center;flex-wrap:wrap;">'
-        f'<span style="background:rgba(0,212,255,.08);border:1px solid rgba(0,212,255,.2);'
-        f'border-radius:3px;padding:2px 8px;font-family:Rajdhani;font-size:.62rem;'
-        f'color:#00d4ff;letter-spacing:.08em;">{source}</span>'
-        f'<span style="font-family:Share Tech Mono;font-size:.65rem;color:#475569;">'
-        f'🕐 {ts_ago} · {art["ts_str"]}</span>'
-        f'</div>'
+        f'margin-bottom:12px;">'
+        f'📊 {len(filtered)} articles • '
+        f'Mis à jour : {_now_utc().strftime("%H:%M UTC")}'
         f'</div>',
         unsafe_allow_html=True,
     )
 
+    keyword = st.text_input("🔍 Filtrer les titres", "", key="news_kw",
+                             placeholder="ex: Fed, NVIDIA, Bitcoin, inflation…")
 
-def _time_ago(ts: datetime) -> str:
-    """Return human-readable time delta from ts to now."""
-    try:
-        now   = datetime.now(timezone.utc)
-        ts_   = ts.astimezone(timezone.utc) if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-        delta = (now - ts_).total_seconds()
-        if delta < 60:
-            return "à l'instant"
-        if delta < 3600:
-            return f"il y a {int(delta//60)} min"
-        if delta < 86400:
-            return f"il y a {int(delta//3600)} h"
-        return f"il y a {int(delta//86400)} j"
-    except Exception:
-        return ""
+    if keyword:
+        filtered = [it for it in filtered
+                    if keyword.lower() in it["title"].lower()
+                    or keyword.lower() in it.get("description", "").lower()]
+
+    _render_news_cards(filtered[:40])
 
 
-def _show_fallback_news():
-    """Show events from CSV as fallback when RSS fails."""
-    events_df = _load_events_csv()
-    if events_df.empty:
+def _render_news_cards(items: list[dict]):
+    """Render news as styled cards with source, date, link."""
+    if not items:
+        st.info("Aucun article trouvé.")
         return
-    st.markdown('<div style="font-family:Rajdhani;font-size:.75rem;color:#ffd700;'
-                'letter-spacing:.08em;margin:12px 0 8px;">📋 ÉVÉNEMENTS PLANIFIÉS (source locale)</div>',
-                unsafe_allow_html=True)
-    for _, row in events_df.iterrows():
-        impact_col = {"high": "#ff3b6b", "medium": "#ffd700", "low": "#00ff88"}.get(
-            str(row.get("impact", "")).lower(), "#7a93b0")
+
+    for it in items:
+        title = it.get("title", "—")
+        link  = it.get("link", "")
+        desc  = it.get("description", "")
+        feed  = it.get("feed_name", "")
+
+        try:
+            dt = datetime.fromisoformat(it.get("published", ""))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            age_h = (_now_utc() - dt).total_seconds() / 3600
+            if age_h < 1:
+                age_str = f"{int(age_h * 60)}min"
+            elif age_h < 24:
+                age_str = f"{int(age_h)}h"
+            else:
+                age_str = f"{int(age_h/24)}j"
+            date_disp = dt.strftime("%d %b %H:%M UTC")
+        except Exception:
+            age_str   = "—"
+            date_disp = "—"
+
+        # Color by recency
+        border_col = "#00d4ff" if age_str.endswith("min") else \
+                     "#ffd700"  if age_str.endswith("h")   else "#2a3a52"
+
+        link_tag = (f'<a href="{link}" target="_blank" style="color:#00d4ff;'
+                    f'text-decoration:none;font-size:.65rem;font-family:Rajdhani;">'
+                    f'🔗 Lire l\'article</a>') if link else ""
+
         st.markdown(
-            f'<div style="background:rgba(255,255,255,.03);border-left:3px solid {impact_col};'
-            f'border-radius:4px;padding:10px 14px;margin-bottom:8px;">'
-            f'<div style="font-family:Rajdhani;font-size:.9rem;color:#e2e8f0;">'
-            f'{row.get("headline","")}</div>'
+            f'<div style="background:rgba(0,0,0,.25);border-left:3px solid {border_col};'
+            f'border-radius:0 6px 6px 0;padding:12px 16px;margin-bottom:8px;">'
+            f'<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">'
+            f'<div style="font-family:Rajdhani;font-size:.95rem;font-weight:700;color:#e2e8f0;'
+            f'line-height:1.4;flex:1;">{title}</div>'
+            f'<div style="font-family:Share Tech Mono;font-size:.6rem;color:{border_col};'
+            f'white-space:nowrap;padding-top:2px;">{age_str}</div>'
+            f'</div>'
+            f'<div style="font-family:Share Tech Mono;font-size:.68rem;color:#7a93b0;'
+            f'margin:4px 0 6px;">{desc[:160] + "…" if len(desc) > 160 else desc}</div>'
+            f'<div style="display:flex;justify-content:space-between;align-items:center;">'
+            f'<span style="font-family:Share Tech Mono;font-size:.6rem;color:#475569;">'
+            f'📰 {feed} · {date_disp}</span>'
+            f'{link_tag}'
+            f'</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+
+def _show_static_fallback():
+    """Show curated static events when RSS unavailable."""
+    df = _load_static_events()
+    if df.empty:
+        st.info("Aucun événement statique disponible.")
+        return
+    section_title("ÉVÉNEMENTS RÉCENTS (données statiques)", "📋")
+    for _, row in df.iterrows():
+        cat  = str(row.get("category", ""))
+        icon = _category_icon(cat)
+        impact = str(row.get("impact", "medium"))
+        st.markdown(
+            f'<div style="background:rgba(0,0,0,.2);border:1px solid rgba(255,255,255,.06);'
+            f'border-radius:6px;padding:10px 14px;margin-bottom:6px;">'
+            f'{icon} <b style="color:#e2e8f0;">{row.get("headline","")}</b> '
+            f'{_impact_badge(impact)}'
             f'<div style="font-family:Share Tech Mono;font-size:.68rem;color:#7a93b0;margin-top:4px;">'
-            f'{row.get("date","")}&nbsp;·&nbsp;{row.get("category","")}&nbsp;·&nbsp;'
-            f'<span style="color:{impact_col};">impact {row.get("impact","")}</span>'
-            f'</div></div>',
-            unsafe_allow_html=True)
+            f'{row.get("description","")}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
 
-# ── Calendar tab ──────────────────────────────────────────────────────────────
-def _calendar_tab():
-    section_title("CALENDRIER DES ÉVÉNEMENTS MARCHÉ", "📅")
+# ── Tab 2 — Market events calendar ───────────────────────────────────────────
 
-    events_df = _load_events_csv()
-    if events_df.empty:
-        st.info("Fichier data/market_events.csv introuvable ou vide.")
+def _market_events_tab():
+    section_title("CALENDRIER DES ÉVÉNEMENTS DE MARCHÉ", "📅")
+
+    df = _load_static_events()
+    if df.empty:
+        st.info("Aucun événement trouvé dans market_events.csv.")
         return
 
     # Filters
     col1, col2, col3 = st.columns(3)
     with col1:
-        cats = ["Tous"] + sorted(events_df["category"].dropna().unique().tolist())
-        cat_filter = st.selectbox("Catégorie", cats, key="ev_cat")
+        cats = ["Tous"] + sorted(df["category"].dropna().unique().tolist())
+        cat_sel = st.selectbox("Catégorie", cats, key="evt_cat")
     with col2:
         impacts = ["Tous", "high", "medium", "low"]
-        imp_filter = st.selectbox("Impact", impacts, key="ev_impact")
+        imp_sel = st.selectbox("Impact", impacts, key="evt_imp")
     with col3:
-        scope_vals = ["Tous"] + sorted(events_df["scope"].dropna().unique().tolist())
-        scope_filter = st.selectbox("Scope", scope_vals, key="ev_scope")
+        active_sel = st.radio("Statut", ["Tous", "Actif", "Passé"], horizontal=True, key="evt_active")
 
-    df = events_df.copy()
-    if cat_filter   != "Tous":
-        df = df[df["category"] == cat_filter]
-    if imp_filter   != "Tous":
-        df = df[df["impact"] == imp_filter]
-    if scope_filter != "Tous":
-        df = df[df["scope"] == scope_filter]
+    df_f = df.copy()
+    if cat_sel != "Tous":
+        df_f = df_f[df_f["category"] == cat_sel]
+    if imp_sel != "Tous":
+        df_f = df_f[df_f["impact"] == imp_sel]
+    if active_sel == "Actif":
+        df_f = df_f[df_f.get("active", pd.Series(True, index=df_f.index)).astype(bool)]
+    elif active_sel == "Passé":
+        df_f = df_f[~df_f.get("active", pd.Series(True, index=df_f.index)).astype(bool)]
 
-    # Show active / upcoming first
-    active   = df[df.get("active", df["active"] if "active" in df.columns else pd.Series(True, index=df.index)) == True]  # noqa
-    inactive = df[df.get("active", df["active"] if "active" in df.columns else pd.Series(True, index=df.index)) != True]  # noqa
-
-    if "active" in df.columns:
-        active   = df[df["active"] == True]
-        inactive = df[df["active"] != True]
-    else:
-        active   = df
-        inactive = pd.DataFrame()
-
-    _render_events_cards(active,   label="🟢 ACTIFS / EN COURS")
-    if not inactive.empty:
-        with st.expander("📁 Événements passés / inactifs"):
-            _render_events_cards(inactive, label="⚫ PASSÉS")
-
-    # Stats
-    st.markdown("<br>", unsafe_allow_html=True)
-    section_title("STATISTIQUES", "📊")
-    if not events_df.empty:
-        by_cat    = events_df["category"].value_counts()
-        by_impact = events_df["impact"].value_counts()
-
-        col_a, col_b = st.columns(2)
-        with col_a:
-            fig1 = go.Figure(go.Pie(
-                labels=by_cat.index, values=by_cat.values,
-                hole=0.55,
-                textfont=dict(family="Share Tech Mono", size=10),
-                hovertemplate="%{label}: %{value}<extra></extra>"))
-            fig1.update_layout(**_P, height=220, showlegend=True,
-                title=dict(text="Par catégorie", font=dict(color="#00d4ff", size=12), x=0.02),
-                legend=dict(font=dict(size=9)))
-            st.plotly_chart(fig1, use_container_width=True)
-
-        with col_b:
-            colors_map = {"high": "#ff3b6b", "medium": "#ffd700", "low": "#00ff88"}
-            fig2 = go.Figure(go.Bar(
-                x=by_impact.index, y=by_impact.values,
-                marker_color=[colors_map.get(i, "#7a93b0") for i in by_impact.index],
-                hovertemplate="%{x}: %{y}<extra></extra>"))
-            fig2.update_layout(**_P, height=220,
-                title=dict(text="Par impact", font=dict(color="#00d4ff", size=12), x=0.02),
-                xaxis=dict(showgrid=False),
-                yaxis=dict(gridcolor="rgba(255,255,255,.04)"))
-            st.plotly_chart(fig2, use_container_width=True)
-
-
-def _render_events_cards(df: pd.DataFrame, label: str):
-    if df.empty:
-        return
     st.markdown(
-        f'<div style="font-family:Rajdhani;font-size:.72rem;color:#7a93b0;'
-        f'letter-spacing:.1em;margin:12px 0 6px;">{label}</div>',
-        unsafe_allow_html=True)
+        f'<div style="font-family:Share Tech Mono;font-size:.7rem;color:#7a93b0;margin-bottom:10px;">'
+        f'{len(df_f)} événements</div>',
+        unsafe_allow_html=True,
+    )
 
-    for _, row in df.iterrows():
-        impact  = str(row.get("impact", "")).lower()
-        imp_col = {"high": "#ff3b6b", "medium": "#ffd700", "low": "#00ff88"}.get(impact, "#7a93b0")
-        imp_lbl = {"high": "⚡ ÉLEVÉ", "medium": "⚠️ MOYEN", "low": "ℹ️ FAIBLE"}.get(impact, "—")
-        cat_col_map = {
-            "Central Banks": "#a78bfa", "Earnings": "#00d4ff", "Geopolitics": "#ff8c00",
-            "Macro": "#00ff88", "Commodities": "#ffd700", "Crypto": "#ff3b6b",
-        }
-        cat_col = cat_col_map.get(str(row.get("category", "")), "#7a93b0")
+    # Sort by date desc (timezone-naive safe)
+    if "date" in df_f.columns:
+        df_f = df_f.sort_values("date", ascending=False)
+
+    for _, row in df_f.iterrows():
+        cat      = str(row.get("category", ""))
+        impact   = str(row.get("impact", "medium"))
+        icon     = _category_icon(cat)
+        imp_col  = _IMPACT_COLOR.get(impact, "#7a93b0")
+        is_active = bool(row.get("active", True))
+        status_badge = (
+            '<span style="background:rgba(0,255,136,.12);border:1px solid #00ff88;'
+            'border-radius:3px;padding:1px 6px;font-size:.6rem;color:#00ff88;">ACTIF</span>'
+            if is_active else
+            '<span style="background:rgba(148,163,184,.08);border:1px solid #475569;'
+            'border-radius:3px;padding:1px 6px;font-size:.6rem;color:#475569;">PASSÉ</span>'
+        )
+
+        try:
+            date_raw = row.get("date", "")
+            if hasattr(date_raw, "strftime"):
+                date_str = date_raw.strftime("%d %b %Y")
+            else:
+                date_str = str(date_raw)[:10]
+        except Exception:
+            date_str = "—"
 
         st.markdown(
-            f'<div style="background:rgba(0,0,0,.2);border:1px solid rgba(255,255,255,.06);'
-            f'border-left:4px solid {imp_col};border-radius:6px;padding:12px 16px;'
-            f'margin-bottom:8px;">'
-            f'<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">'
-            f'<div style="flex:1;">'
-            f'<div style="font-family:Rajdhani;font-size:.95rem;font-weight:700;'
-            f'color:#e2e8f0;letter-spacing:.03em;">{row.get("headline", "")}</div>'
-            f'<div style="font-family:Share Tech Mono;font-size:.68rem;color:#7a93b0;'
-            f'margin-top:6px;line-height:1.6;">{row.get("description", "")}</div>'
+            f'<div style="background:rgba(0,0,0,.2);border-left:4px solid {imp_col};'
+            f'border-radius:0 8px 8px 0;padding:12px 16px;margin-bottom:8px;">'
+            f'<div style="display:flex;justify-content:space-between;align-items:center;'
+            f'margin-bottom:6px;">'
+            f'<div style="font-family:Rajdhani;font-size:1rem;font-weight:700;color:#e2e8f0;">'
+            f'{icon} {row.get("headline","")}</div>'
+            f'<div style="display:flex;gap:6px;align-items:center;">'
+            f'{_impact_badge(impact)} {status_badge}</div>'
             f'</div>'
-            f'<div style="text-align:right;min-width:90px;">'
-            f'<div style="font-family:Share Tech Mono;font-size:.65rem;color:#475569;">'
-            f'{row.get("date", "")}</div>'
-            f'<div style="font-family:Rajdhani;font-size:.68rem;font-weight:700;color:{imp_col};'
-            f'margin-top:4px;">{imp_lbl}</div>'
-            f'</div>'
-            f'</div>'
-            f'<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">'
-            f'<span style="background:rgba({cat_col[1:]},10);border:1px solid {cat_col}40;'
-            f'border-radius:3px;padding:1px 8px;font-family:Rajdhani;font-size:.6rem;color:{cat_col};">'
-            f'{row.get("category", "")}</span>'
+            f'<div style="font-family:Share Tech Mono;font-size:.7rem;color:#7a93b0;'
+            f'margin-bottom:6px;">{row.get("description","")}</div>'
+            f'<div style="display:flex;gap:16px;">'
             f'<span style="font-family:Share Tech Mono;font-size:.62rem;color:#475569;">'
-            f'🌐 {row.get("scope", "")}</span>'
+            f'📅 {date_str}</span>'
+            f'<span style="font-family:Share Tech Mono;font-size:.62rem;color:#475569;">'
+            f'🏷️ {cat}</span>'
+            f'<span style="font-family:Share Tech Mono;font-size:.62rem;color:#475569;">'
+            f'🌐 {row.get("scope","Global")}</span>'
             f'</div>'
             f'</div>',
-            unsafe_allow_html=True)
+            unsafe_allow_html=True,
+        )
 
 
-# ── Impact tab ────────────────────────────────────────────────────────────────
-def _impact_tab():
-    section_title("ANALYSE D'IMPACT SUR LES MARCHÉS", "📊")
+# ── Tab 3 — Impact analysis ───────────────────────────────────────────────────
 
-    st.markdown(
-        '<div style="font-family:Share Tech Mono;font-size:.73rem;color:#7a93b0;'
-        'margin-bottom:14px;line-height:1.8;">'
-        'Analyse des corrélations entre événements et mouvements de marché.<br>'
-        'Basé sur les données historiques de yfinance et le calendrier d\'événements.'
-        '</div>', unsafe_allow_html=True)
+def _impact_analysis_tab():
+    section_title("ANALYSE D'IMPACT DES ÉVÉNEMENTS", "📊")
 
-    # Category sentiment matrix
-    categories_news = list(RSS_FEEDS.keys())
-    sentiment_data  = {
-        "Markets":            {"positive": 45, "neutral": 30, "negative": 25},
-        "Tech & Equities":    {"positive": 52, "neutral": 28, "negative": 20},
-        "Crypto":             {"positive": 38, "neutral": 25, "negative": 37},
-        "Macro & Central Banks": {"positive": 30, "neutral": 40, "negative": 30},
-        "Geopolitics":        {"positive": 20, "neutral": 35, "negative": 45},
-        "Commodities & FX":   {"positive": 42, "neutral": 33, "negative": 25},
-    }
+    df = _load_static_events()
+    if df.empty:
+        st.info("Aucune donnée disponible.")
+        return
 
-    section_title("SENTIMENT PAR CATÉGORIE", "🎯")
-    cols = st.columns(3)
-    for i, (cat, sent) in enumerate(sentiment_data.items()):
-        with cols[i % 3]:
-            pos, neu, neg = sent["positive"], sent["neutral"], sent["negative"]
-            dominant_col = "#00ff88" if pos > neg else ("#ff3b6b" if neg > pos else "#ffd700")
-            dominant_lbl = "HAUSSIER" if pos > neg else ("BAISSIER" if neg > pos else "NEUTRE")
-            st.markdown(
-                f'<div style="background:rgba(0,0,0,.2);border:1px solid rgba(255,255,255,.06);'
-                f'border-radius:8px;padding:12px;margin-bottom:10px;">'
-                f'<div style="font-family:Rajdhani;font-size:.72rem;font-weight:700;'
-                f'color:#e2e8f0;letter-spacing:.06em;margin-bottom:8px;">{cat}</div>'
-                f'<div style="font-family:Share Tech Mono;font-size:.68rem;margin-bottom:6px;">'
-                f'<span style="color:#00ff88;">▲ {pos}%</span>&nbsp;&nbsp;'
-                f'<span style="color:#7a93b0;">— {neu}%</span>&nbsp;&nbsp;'
-                f'<span style="color:#ff3b6b;">▼ {neg}%</span></div>'
-                f'<div style="background:rgba(255,255,255,.05);border-radius:3px;height:6px;'
-                f'overflow:hidden;display:flex;">'
-                f'<div style="width:{pos}%;background:#00ff88;"></div>'
-                f'<div style="width:{neu}%;background:#475569;"></div>'
-                f'<div style="width:{neg}%;background:#ff3b6b;"></div>'
-                f'</div>'
-                f'<div style="font-family:Rajdhani;font-size:.65rem;font-weight:700;'
-                f'color:{dominant_col};margin-top:6px;letter-spacing:.08em;">{dominant_lbl}</div>'
-                f'</div>',
-                unsafe_allow_html=True)
+    # Impact distribution
+    col_a, col_b = st.columns(2)
+    with col_a:
+        section_title("RÉPARTITION PAR IMPACT", "🎯")
+        impact_counts = df["impact"].value_counts()
+        fig_pie = go.Figure(go.Pie(
+            labels=impact_counts.index.tolist(),
+            values=impact_counts.values.tolist(),
+            hole=0.55,
+            marker=dict(colors=["#ff3b6b", "#ffd700", "#00ff88"]),
+            textfont=dict(family="Share Tech Mono", size=10),
+            hovertemplate="<b>%{label}</b><br>%{value} événements<extra></extra>",
+        ))
+        fig_pie.update_layout(**_P, height=250, showlegend=True,
+            legend=dict(font=dict(size=9, family="Share Tech Mono"), bgcolor="rgba(0,0,0,0)"))
+        st.plotly_chart(fig_pie, use_container_width=True)
 
-    # Market heat index
-    section_title("INDICE DE CHALEUR DU MARCHÉ", "🌡️")
-    heat_index = 58  # Placeholder — can be computed from live data
-    heat_col   = "#00ff88" if heat_index < 40 else ("#ffd700" if heat_index < 65 else "#ff3b6b")
-    heat_lbl   = "FEAR" if heat_index < 30 else (
-                 "GREED" if heat_index > 70 else (
-                 "EXTREME GREED" if heat_index > 85 else "NEUTRAL"))
+    with col_b:
+        section_title("RÉPARTITION PAR CATÉGORIE", "📋")
+        cat_counts = df["category"].value_counts()
+        fig_bar = go.Figure(go.Bar(
+            x=cat_counts.values.tolist(),
+            y=cat_counts.index.tolist(),
+            orientation="h",
+            marker_color="rgba(0,212,255,.6)",
+            hovertemplate="%{y}: %{x} événements<extra></extra>",
+        ))
+        fig_bar.update_layout(**_P, height=250,
+            xaxis=dict(title="Nombre", showgrid=False),
+            yaxis=dict(gridcolor="rgba(255,255,255,.04)"))
+        st.plotly_chart(fig_bar, use_container_width=True)
 
-    st.markdown(
-        f'<div style="background:rgba(0,0,0,.2);border:1px solid rgba(255,255,255,.08);'
-        f'border-radius:10px;padding:20px;text-align:center;max-width:400px;margin:0 auto 20px;">'
-        f'<div style="font-family:Rajdhani;font-size:.72rem;color:#7a93b0;letter-spacing:.1em;'
-        f'margin-bottom:10px;">FEAR & GREED INDEX (approximation)</div>'
-        f'<div style="font-family:Share Tech Mono;font-size:3rem;color:{heat_col};'
-        f'font-weight:bold;line-height:1;">{heat_index}</div>'
-        f'<div style="font-family:Rajdhani;font-size:1rem;color:{heat_col};font-weight:700;'
-        f'letter-spacing:.12em;margin-top:6px;">{heat_lbl}</div>'
-        f'<div style="background:rgba(255,255,255,.05);border-radius:4px;height:10px;'
-        f'margin:12px 0 0;overflow:hidden;">'
-        f'<div style="width:{heat_index}%;height:100%;'
-        f'background:linear-gradient(90deg,#00ff88,#ffd700,#ff3b6b);"></div>'
-        f'</div></div>',
-        unsafe_allow_html=True)
+    # Timeline
+    if "date" in df.columns:
+        section_title("TIMELINE DES ÉVÉNEMENTS", "📅")
+        df_tl = df.dropna(subset=["date"]).copy()
+        # All dates as naive for comparison
+        df_tl["date_naive"] = pd.to_datetime(df_tl["date"]).dt.tz_localize(None)
+        df_tl = df_tl.sort_values("date_naive")
 
-    # Key events watchlist
-    section_title("WATCHLIST ÉVÉNEMENTS CLÉS À VENIR", "👁️")
-    upcoming = [
-        {"date": "2026-05-14", "event": "CPI US (Inflation IPC)", "impact": "high",   "asset": "SPY, DXY, GLD"},
-        {"date": "2026-05-15", "event": "PPI US (Prix producteurs)", "impact": "medium", "asset": "SPY, TLT"},
-        {"date": "2026-05-21", "event": "FOMC Minutes publiés",    "impact": "high",   "asset": "Toutes classes"},
-        {"date": "2026-05-28", "event": "PCE Core (inflation Fed)", "impact": "high",   "asset": "SPY, TLT, DXY"},
-        {"date": "2026-06-01", "event": "NFP (emplois US)",         "impact": "high",   "asset": "SPY, DXY"},
-        {"date": "2026-06-05", "event": "BCE — Décision de taux",  "impact": "high",   "asset": "EURUSD, ^FCHI"},
-        {"date": "2026-06-11", "event": "Réunion FOMC",            "impact": "high",   "asset": "Toutes classes"},
-    ]
-    for ev in upcoming:
-        imp_col = {"high": "#ff3b6b", "medium": "#ffd700", "low": "#00ff88"}.get(ev["impact"], "#7a93b0")
-        st.markdown(
-            f'<div style="background:rgba(0,0,0,.15);border-left:3px solid {imp_col};'
-            f'border-radius:4px;padding:10px 14px;margin-bottom:6px;'
-            f'display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">'
-            f'<div>'
-            f'<span style="font-family:Share Tech Mono;font-size:.65rem;color:#475569;">{ev["date"]}</span>'
-            f'<div style="font-family:Rajdhani;font-size:.9rem;font-weight:700;'
-            f'color:#e2e8f0;margin-top:2px;">{ev["event"]}</div>'
-            f'</div>'
-            f'<div style="text-align:right;">'
-            f'<div style="font-family:Share Tech Mono;font-size:.65rem;color:#7a93b0;">{ev["asset"]}</div>'
-            f'<div style="font-family:Rajdhani;font-size:.65rem;font-weight:700;color:{imp_col};'
-            f'letter-spacing:.08em;">impact {ev["impact"].upper()}</div>'
-            f'</div>'
-            f'</div>',
-            unsafe_allow_html=True)
+        imp_color_map = {"high": "#ff3b6b", "medium": "#ffd700", "low": "#00ff88"}
+        colors_tl = [imp_color_map.get(str(i), "#7a93b0") for i in df_tl["impact"]]
+
+        fig_tl = go.Figure()
+        for i, (_, row) in enumerate(df_tl.iterrows()):
+            col_tl = imp_color_map.get(str(row.get("impact", "")), "#7a93b0")
+            fig_tl.add_trace(go.Scatter(
+                x=[row["date_naive"]],
+                y=[i],
+                mode="markers+text",
+                marker=dict(size=10, color=col_tl, symbol="circle"),
+                text=[str(row.get("headline", ""))[:50] + "…"],
+                textposition="middle right",
+                textfont=dict(size=9, color="#94a3b8", family="Share Tech Mono"),
+                showlegend=False,
+                hovertemplate=(
+                    f'<b>{row.get("headline","")}</b><br>'
+                    f'Date: {row["date_naive"].strftime("%d %b %Y") if hasattr(row["date_naive"], "strftime") else "—"}<br>'
+                    f'Impact: {row.get("impact","")}<br>'
+                    f'Catégorie: {row.get("category","")}<extra></extra>'
+                ),
+            ))
+
+        fig_tl.update_layout(
+            **_P,
+            height=max(300, len(df_tl) * 32),
+            xaxis=dict(title="Date", gridcolor="rgba(255,255,255,.04)"),
+            yaxis=dict(showticklabels=False, showgrid=False),
+        )
+        st.plotly_chart(fig_tl, use_container_width=True)
+
+    # Live news sentiment overview
+    section_title("VOLUME D'ACTUALITÉS EN DIRECT (par source)", "📡")
+    news = fetch_live_news()
+    if news:
+        from collections import Counter
+        src_counts = Counter(it.get("feed_name", "Other") for it in news)
+        fig_src = go.Figure(go.Bar(
+            x=list(src_counts.keys()),
+            y=list(src_counts.values()),
+            marker_color="rgba(0,212,255,.55)",
+            hovertemplate="%{x}<br>%{y} articles<extra></extra>",
+        ))
+        fig_src.update_layout(**_P, height=220,
+            xaxis=dict(showgrid=False, tickangle=-25),
+            yaxis=dict(title="Articles", gridcolor="rgba(255,255,255,.04)"))
+        st.plotly_chart(fig_src, use_container_width=True)
+
+        metric_row([
+            {"label": "Articles live",   "value": str(len(news)),     "color": ""},
+            {"label": "Sources actives", "value": str(len(src_counts)), "color": ""},
+            {"label": "Dernière MAJ",    "value": _now_utc().strftime("%H:%M UTC"), "color": ""},
+            {"label": "Cache TTL",       "value": f"{_CACHE_TTL//60} min", "color": ""},
+        ])
+    else:
+        st.info("Données live non disponibles. Activez la connexion réseau.")
