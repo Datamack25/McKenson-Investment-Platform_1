@@ -1,479 +1,659 @@
-# pages/trading.py  —  MAM Trading Desk
+# pages/trading.py  —  MAM  v3.2  FIXED
 """
-Spot trading (BUY/SELL) + European Options with Black-Scholes pricing,
-full Greeks, and order ticket.
-FIXED: fig.add_fill replaced with correct go.Scatter fill trace.
+Trading Desk: Spot trading + European Options (Black-Scholes + full Greeks).
+
+FIX v3.2:
+  - Options: added proper "Valider l'ordre" submit button with confirmation
+  - fig.add_fill → fig.add_trace (Plotly API fix)
+  - Timezone-aware datetime fix in history charts
 """
 from __future__ import annotations
 import math
-import pandas as pd
+from datetime import datetime
+
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 from components.ui import section_title, metric_row, pnl_cell
 from utils.data import (
     get_or_init_state, persist, load_assets,
-    get_multi_prices, get_price, get_history, record_trade,
-    value_portfolio,
+    get_price, get_price_change, get_history,
+    get_multi_prices, value_portfolio, record_trade,
 )
-from utils.options import bs_price, bs_greeks, implied_vol, build_strategy_legs, payoff_at_expiry, STRATEGY_META
+from utils.options import bs_price, bs_greeks, implied_vol, STRATEGY_META
 
-_P = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-          font=dict(color="#94a3b8", family="Share Tech Mono"),
-          margin=dict(l=8, r=8, t=28, b=8))
+_P = dict(
+    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+    font=dict(color="#94a3b8", family="Share Tech Mono"),
+    margin=dict(l=8, r=8, t=28, b=8),
+)
 
 
 def render():
-    state    = get_or_init_state()
-    team_id  = st.session_state.get("active_team")
-    port_id  = st.session_state.get("active_portfolio")
-    teams    = state.get("teams", {})
+    state      = get_or_init_state()
+    team_id    = st.session_state.get("active_team")
+    port_id    = st.session_state.get("active_portfolio")
+    teams      = state.get("teams", {})
 
     st.markdown(
         '<h1 style="font-family:Rajdhani,sans-serif;font-size:2rem;letter-spacing:.12em;'
-        'color:#00d4ff;margin:0 0 2px;text-shadow:0 0 30px rgba(0,212,255,.4);">'
-        '💼 TRADING DESK — MAM</h1>', unsafe_allow_html=True)
+        'color:#00ff88;margin:0 0 2px;text-shadow:0 0 30px rgba(0,255,136,.4);">'
+        '💼 TRADING DESK — MAM</h1>',
+        unsafe_allow_html=True,
+    )
 
-    if not team_id or not port_id:
-        st.warning("⚠️ Sélectionnez une équipe et un portefeuille dans la barre latérale.")
+    if not team_id or team_id not in teams:
+        st.error("Sélectionnez une équipe dans la barre latérale.")
+        return
+    if not port_id:
+        st.error("Sélectionnez un portefeuille actif dans la barre latérale.")
         return
 
-    port = teams[team_id]["portfolios"].get(port_id, {})
+    port = teams[team_id]["portfolios"].get(port_id)
+    if not port:
+        st.error(f"Portefeuille {port_id} introuvable.")
+        return
 
-    tab_spot, tab_options, tab_book = st.tabs([
+    assets_df = load_assets()
+
+    tab_spot, tab_options, tab_positions = st.tabs([
         "📈 SPOT TRADING",
-        "🎯 OPTIONS (Black-Scholes)",
-        "📋 CARNET D'ORDRES",
+        "⚙️ OPTIONS (BLACK-SCHOLES)",
+        "📋 TOUTES LES POSITIONS",
     ])
 
     with tab_spot:
-        _spot_trading(port, state, team_id, port_id)
+        _spot_desk(port, state, team_id, port_id, assets_df)
 
     with tab_options:
-        _options_desk(port, state, team_id, port_id)
+        _options_desk(port, state, team_id, port_id, assets_df)
 
-    with tab_book:
-        _order_book(port)
+    with tab_positions:
+        _all_positions(teams, assets_df)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-def _spot_trading(port, state, team_id, port_id):
-    section_title("TRADING SPOT — ACHAT / VENTE", "📈")
+# ══════════════════════════════════════════════════════════════════════════════
+#  SPOT TRADING
+# ══════════════════════════════════════════════════════════════════════════════
 
-    assets_df = load_assets()
-    categories = sorted(assets_df["category"].unique()) if not assets_df.empty else []
+def _spot_desk(port, state, team_id, port_id, assets_df):
+    section_title("PASSER UN ORDRE SPOT", "📈")
 
-    col_filter, col_search = st.columns([2, 3])
-    with col_filter:
-        cat = st.selectbox("Catégorie", ["Tous"] + categories, key="tr_cat")
-    with col_search:
-        search = st.text_input("Rechercher un ticker ou nom", "", key="tr_search",
-                               placeholder="ex: AAPL, Bitcoin, Gold...")
+    col_l, col_r = st.columns([1, 1])
 
-    # Filter assets
-    df = assets_df.copy()
-    if cat != "Tous":
-        df = df[df["category"] == cat]
-    if search:
-        mask = (df["ticker"].str.contains(search, case=False, na=False) |
-                df["name"].str.contains(search, case=False, na=False))
-        df = df[mask]
+    with col_l:
+        # Asset selector
+        ticker_opts = {
+            f'{row["ticker"]} — {row["name"]}': row["ticker"]
+            for _, row in assets_df.iterrows()
+        }
+        sel    = st.selectbox("Actif", list(ticker_opts.keys()), key="spot_asset")
+        ticker = ticker_opts[sel]
 
-    if df.empty:
-        st.info("Aucun actif trouvé.")
-        return
+        action = st.radio("Direction", ["🟢 ACHETER", "🔴 VENDRE"],
+                          horizontal=True, key="spot_dir")
+        is_buy = "ACHETER" in action
 
-    tickers = tuple(df["ticker"].tolist())
-    prices_raw = get_multi_prices(tickers)
+        # Live price
+        price, pct = get_price_change(ticker)
+        p_col = "#00ff88" if pct >= 0 else "#ff3b6b"
+        p_arr = "▲" if pct >= 0 else "▼"
+        sign  = "+" if pct >= 0 else ""
 
-    # Asset selector
-    options_map = {
-        f'{row["ticker"]} — {row["name"]} ({row["category"]})': row["ticker"]
-        for _, row in df.iterrows()
-    }
-    selected_label = st.selectbox("Sélectionner l'actif", list(options_map.keys()), key="tr_asset")
-    ticker = options_map[selected_label]
-    price, pct = prices_raw.get(ticker, (0.0, 0.0))
+        st.markdown(
+            f'<div style="background:rgba(0,0,0,.3);border:1px solid rgba(0,212,255,.2);'
+            f'border-radius:6px;padding:10px 14px;margin:8px 0;">'
+            f'<div style="font-family:Rajdhani;font-size:.68rem;color:#7a93b0;'
+            f'letter-spacing:.12em;text-transform:uppercase;">Prix actuel — {ticker}</div>'
+            f'<div style="font-family:Share Tech Mono;font-size:1.6rem;color:#e2e8f0;">'
+            f'${price:,.4f}</div>'
+            f'<div style="font-family:Share Tech Mono;font-size:.8rem;color:{p_col};">'
+            f'{p_arr} {sign}{abs(pct):.2f}% vs clôture préc.</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
-    asset_row = df[df["ticker"] == ticker].iloc[0]
+        # Order size
+        order_type = st.radio("Type", ["Par quantité", "Par montant ($)"],
+                               horizontal=True, key="spot_type")
+        if order_type == "Par quantité":
+            qty         = st.number_input("Quantité", min_value=0.0001, value=1.0,
+                                          step=0.001, key="spot_qty", format="%.4f")
+            total_order = qty * price
+        else:
+            amount      = st.number_input("Montant ($)", min_value=1.0,
+                                          value=min(10000.0, port.get("cash", 0)),
+                                          step=100.0, key="spot_amount")
+            qty         = amount / price if price > 0 else 0
+            total_order = amount
 
-    # Live price display
-    col1, col2, col3, col4, col5 = st.columns(5)
-    pct_color = "#00ff88" if pct >= 0 else "#ff3b6b"
-    arr = "▲" if pct >= 0 else "▼"
+        # Mini chart
+        hist = get_history(ticker, "1mo")
+        if not hist.empty and "Close" in hist.columns:
+            # FIX: strip timezone
+            if hist.index.tz is not None:
+                hist.index = hist.index.tz_localize(None)
+            fig = go.Figure(go.Scatter(
+                x=hist.index, y=hist["Close"], mode="lines",
+                line=dict(color="#00d4ff" if pct >= 0 else "#ff3b6b", width=2),
+                fill="tozeroy",
+                fillcolor="rgba(0,212,255,.06)" if pct >= 0 else "rgba(255,59,107,.06)",
+                hovertemplate="%{x|%d/%m}<br>$%{y:,.4f}<extra></extra>",
+            ))
+            fig.update_layout(**_P, height=140,
+                xaxis=dict(showgrid=False, showticklabels=False),
+                yaxis=dict(showgrid=False, tickfont=dict(size=9)))
+            st.plotly_chart(fig, use_container_width=True)
 
-    def _mini_card(col, label, value, color="#e2e8f0"):
-        with col:
-            st.markdown(
-                f'<div style="background:rgba(0,212,255,.05);border:1px solid rgba(0,212,255,.15);'
-                f'border-radius:6px;padding:10px;text-align:center;">'
-                f'<div style="font-family:Rajdhani;font-size:.65rem;color:#7a93b0;'
-                f'letter-spacing:.1em;text-transform:uppercase;">{label}</div>'
-                f'<div style="font-family:Share Tech Mono;font-size:1rem;color:{color};font-weight:bold;">{value}</div>'
-                f'</div>', unsafe_allow_html=True)
+    with col_r:
+        # Portfolio context
+        cash     = port.get("cash", 0.0)
+        holdings = port.get("holdings", {})
+        pos_qty  = holdings.get(ticker, {}).get("qty", 0)
 
-    _mini_card(col1, "Ticker", ticker, "#00d4ff")
-    _mini_card(col2, "Prix actuel",
-               f'{"$" if asset_row["currency"]=="USD" else ""}{price:,.4f} {asset_row["currency"]}',
-               "#e2e8f0")
-    _mini_card(col3, "Variation", f'{arr} {abs(pct):.2f}%', pct_color)
-    _mini_card(col4, "Exchange", asset_row.get("exchange", "—"), "#7a93b0")
-    _mini_card(col5, "Catégorie", asset_row.get("category", "—"), "#a78bfa")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # Price history sparkline
-    hist = get_history(ticker, "1mo")
-    if not hist.empty and "Close" in hist.columns:
-        fig_spark = go.Figure()
-        fig_spark.add_trace(go.Scatter(
-            x=hist.index, y=hist["Close"],
-            mode="lines", line=dict(color="#00d4ff", width=1.5),
-            fill="tozeroy", fillcolor="rgba(0,212,255,.06)",
-            hovertemplate="%{x|%d %b}<br>$%{y:,.2f}<extra></extra>"))
-        fig_spark.update_layout(**_P, height=120,
-            xaxis=dict(showgrid=False, showticklabels=True),
-            yaxis=dict(showgrid=False, showticklabels=True))
-        st.plotly_chart(fig_spark, use_container_width=True)
-
-    st.markdown("---")
-    section_title("TICKET D'ORDRE", "🎫")
-
-    # Portfolio info
-    holdings = port.get("holdings", {})
-    cash = port.get("cash", 0.0)
-    current_qty = holdings.get(ticker, {}).get("qty", 0.0)
-    avg_price   = holdings.get(ticker, {}).get("avg_price", 0.0)
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        action = st.radio("Direction", ["BUY", "SELL"], horizontal=True, key="tr_action")
-    with c2:
-        max_qty = (cash / price) if (action == "BUY" and price > 0) else current_qty
-        qty_input = st.number_input(
-            "Quantité", min_value=0.0001, max_value=max(max_qty, 0.0001),
-            value=min(1.0, max(max_qty, 0.0001)), step=0.001,
-            format="%.4f", key="tr_qty")
-    with c3:
-        order_total = qty_input * price
         st.markdown(
             f'<div style="background:rgba(0,212,255,.05);border:1px solid rgba(0,212,255,.15);'
-            f'border-radius:6px;padding:14px;margin-top:4px;">'
-            f'<div style="font-family:Rajdhani;font-size:.65rem;color:#7a93b0;letter-spacing:.1em;">TOTAL ORDRE</div>'
-            f'<div style="font-family:Share Tech Mono;font-size:1.3rem;color:#ffd700;font-weight:bold;">'
-            f'${order_total:,.2f}</div>'
-            f'<div style="font-family:Share Tech Mono;font-size:.7rem;color:#7a93b0;">'
-            f'Cash dispo: ${cash:,.0f} | Position: {current_qty:,.4f}</div>'
-            f'</div>', unsafe_allow_html=True)
+            f'border-radius:8px;padding:14px;margin-bottom:12px;">'
+            f'<div style="font-family:Rajdhani;font-size:.72rem;font-weight:700;color:#00d4ff;'
+            f'letter-spacing:.12em;text-transform:uppercase;margin-bottom:8px;">'
+            f'{port.get("emoji","")} {port.get("name","")}</div>'
+            f'<div style="font-family:Share Tech Mono;font-size:.8rem;color:#e2e8f0;line-height:1.8;">'
+            f'Cash disponible : <b style="color:#00d4ff;">${cash:,.2f}</b><br>'
+            f'Position actuelle {ticker} : <b style="color:#00d4ff;">{pos_qty:,.4f}</b><br>'
+            f'Valeur de l\'ordre : <b style="color:#ffd700;">${total_order:,.2f}</b><br>'
+            f'Quantité : <b style="color:#ffd700;">{qty:,.4f}</b>'
+            f'</div></div>',
+            unsafe_allow_html=True,
+        )
 
-    btn_label = f"{'🟢 ACHETER' if action=='BUY' else '🔴 VENDRE'} {qty_input:,.4f} {ticker} @ ${price:,.4f}"
+        # Validation
+        errors = []
+        if is_buy and total_order > cash + 0.01:
+            errors.append(f"❌ Fonds insuffisants (cash: ${cash:,.0f}, ordre: ${total_order:,.0f})")
+        if not is_buy and qty > pos_qty + 1e-6:
+            errors.append(f"❌ Position insuffisante ({pos_qty:,.4f} disponibles)")
+        if qty <= 0:
+            errors.append("❌ Quantité invalide")
 
-    if st.button(btn_label, key="tr_exec", use_container_width=True):
-        err = record_trade(port, ticker, action, qty_input, price)
-        if err:
-            st.error(f"❌ Erreur : {err}")
-        else:
-            state["teams"][team_id]["portfolios"][port_id] = port
-            persist()
-            st.success(f"✅ Ordre exécuté : {action} {qty_input:,.4f} {ticker} @ ${price:,.4f}")
-            st.rerun()
+        for err in errors:
+            st.markdown(
+                f'<div style="background:rgba(255,59,107,.1);border:1px solid rgba(255,59,107,.3);'
+                f'border-radius:4px;padding:8px 12px;font-family:Share Tech Mono;'
+                f'font-size:.78rem;color:#ff3b6b;margin:4px 0;">{err}</div>',
+                unsafe_allow_html=True,
+            )
 
-    # Portfolio position summary
-    if current_qty > 0:
-        unreal_pnl = (price - avg_price) * current_qty
-        pnl_pct    = (price - avg_price) / avg_price * 100 if avg_price else 0
-        st.markdown("<br>", unsafe_allow_html=True)
-        section_title(f"POSITION EXISTANTE — {ticker}", "📊")
-        metric_row([
-            {"label": "Quantité détenue", "value": f"{current_qty:,.4f}", "color": ""},
-            {"label": "Prix moyen",       "value": f"${avg_price:,.4f}", "color": ""},
-            {"label": "Valeur de marché", "value": f"${current_qty*price:,.2f}", "color": ""},
-            {"label": "P&L non réalisé",  "value": f"${unreal_pnl:+,.2f} ({pnl_pct:+.2f}%)",
-             "color": "positive" if unreal_pnl >= 0 else "negative"},
-        ])
+        # Summary
+        btn_col = "#00ff88" if is_buy else "#ff3b6b"
+        btn_txt = f'{"✅ ACHETER" if is_buy else "🔴 VENDRE"} {qty:,.4f} × {ticker}'
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-def _options_desk(port, state, team_id, port_id):
-    section_title("OPTIONS EUROPÉENNES — BLACK-SCHOLES", "🎯")
-
-    st.markdown("""
-    <div style="background:rgba(124,58,237,.06);border:1px solid rgba(124,58,237,.25);
-    border-radius:8px;padding:12px 16px;margin-bottom:16px;font-family:Share Tech Mono;
-    font-size:.75rem;color:#94a3b8;line-height:1.8;">
-    🎯 <b style="color:#a78bfa;">Pricing Black-Scholes</b> — Options européennes uniquement.<br>
-    Pricer basé sur le modèle de Black-Scholes 1973 avec les Grecques complètes (Δ, Γ, Θ, ν, ρ).
-    </div>""", unsafe_allow_html=True)
-
-    assets_df = load_assets()
-    # Only tradeable spot underlyings
-    opt_assets = assets_df[assets_df["category"].isin(["Equities", "ETF", "Crypto"])]
-
-    col1, col2 = st.columns([1, 1])
-
-    with col1:
-        section_title("PARAMÈTRES DE L'OPTION", "⚙️")
-        tickers_opts = {f'{r["ticker"]} — {r["name"]}': r["ticker"]
-                        for _, r in opt_assets.iterrows()}
-        sel = st.selectbox("Sous-jacent", list(tickers_opts.keys()), key="opt_underlying")
-        underlying = tickers_opts[sel]
-
-        price = get_price(underlying)
         st.markdown(
-            f'<div style="font-family:Share Tech Mono;font-size:.8rem;color:#00d4ff;margin:4px 0 10px;">'
-            f'Prix spot : <b>${price:,.4f}</b></div>', unsafe_allow_html=True)
+            f'<div style="background:rgba(0,0,0,.25);border:1px solid rgba(255,255,255,.08);'
+            f'border-radius:6px;padding:10px 14px;margin-bottom:10px;'
+            f'font-family:Share Tech Mono;font-size:.77rem;">'
+            f'<div style="color:#7a93b0;margin-bottom:6px;font-family:Rajdhani;font-size:.7rem;'
+            f'letter-spacing:.12em;text-transform:uppercase;">Récapitulatif</div>'
+            f'Direction : <span style="color:{btn_col};font-weight:bold;">'
+            f'{"ACHAT" if is_buy else "VENTE"}</span><br>'
+            f'Actif : <b style="color:#00d4ff;">{ticker}</b><br>'
+            f'Quantité : <b style="color:#ffd700;">{qty:,.4f}</b><br>'
+            f'Prix : <b>${price:,.4f}</b><br>'
+            f'Total : <b style="color:#ffd700;">${total_order:,.2f}</b>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
-        opt_type = st.radio("Type", ["call", "put"], horizontal=True, key="opt_type")
-        K   = st.number_input("Strike (K)", min_value=0.01,
-                               value=round(price * 1.0, 2), step=0.5, key="opt_K")
-        T_days = st.slider("Maturité (jours)", 1, 730, 30, key="opt_T")
-        T   = T_days / 365.0
-        r   = st.slider("Taux sans risque (%)", 0.0, 10.0, 4.25, 0.05, key="opt_r") / 100
-        sig = st.slider("Volatilité implicite (%)", 1.0, 200.0, 25.0, 0.5, key="opt_sig") / 100
-        n_contracts = st.number_input("Nombre de contrats (×100 actions)", 1, 1000, 1, key="opt_n")
+        if st.button(btn_txt, disabled=len(errors) > 0, key="spot_exec",
+                     type="primary" if not errors else "secondary"):
+            err = record_trade(port, ticker, "BUY" if is_buy else "SELL", qty, price)
+            if err:
+                st.error(err)
+            else:
+                st.success(f"✅ {'Achat' if is_buy else 'Vente'} exécuté : "
+                           f"{qty:,.4f} × {ticker} @ ${price:,.4f}")
+                st.rerun()
 
-    with col2:
-        section_title("RÉSULTATS BLACK-SCHOLES", "📊")
-        premium = bs_price(price, K, T, r, sig, opt_type)
-        greeks  = bs_greeks(price, K, T, r, sig, opt_type)
-        total_premium = premium * 100 * n_contracts
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  OPTIONS DESK  (Black-Scholes + full Greeks + validated submit)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _options_desk(port, state, team_id, port_id, assets_df):
+    section_title("OPTIONS EUROPÉENNES — BLACK-SCHOLES", "⚙️")
+
+    # Filter to optionable assets (equities + ETFs)
+    if "category" in assets_df.columns:
+        opt_mask  = assets_df["category"].isin(["Equities", "ETF", "Crypto", "Equity"])
+        opt_assets = assets_df[opt_mask]
+    else:
+        opt_assets = assets_df
+    if opt_assets.empty:
+        opt_assets = assets_df
+
+    ticker_opts = {
+        f'{row["ticker"]} — {row["name"]}': row["ticker"]
+        for _, row in opt_assets.head(60).iterrows()
+    }
+
+    col_l, col_r = st.columns([1, 1])
+
+    with col_l:
+        sel    = st.selectbox("Sous-jacent", list(ticker_opts.keys()), key="opt_asset")
+        ticker = ticker_opts[sel]
+        spot   = get_price(ticker)
+
+        st.markdown(
+            f'<div style="font-family:Share Tech Mono;font-size:.78rem;color:#7a93b0;'
+            f'margin-bottom:8px;">Prix spot : <b style="color:#00d4ff;">${spot:,.4f}</b></div>',
+            unsafe_allow_html=True,
+        )
+
+        opt_type   = st.radio("Type", ["call", "put"], horizontal=True, key="opt_type")
+        K          = st.number_input("Strike (K)", 0.01, 1e6,
+                                     max(round(spot, 2), 0.01), key="opt_K")
+        T_days     = st.slider("Maturité (jours)", 1, 730, 30, key="opt_T")
+        T          = T_days / 365.0
+        r_rate     = st.slider("Taux sans risque (%)", 0.0, 10.0, 4.25, 0.1, key="opt_r") / 100
+        sigma      = st.slider("Volatilité implicite (%)", 1.0, 150.0, 20.0, 0.5, key="opt_sig") / 100
+        n_contracts = st.number_input("Nombre de contrats (×100 actions)",
+                                      min_value=1, value=1, step=1, key="opt_n")
+
+    with col_r:
+        # ── Black-Scholes computation ──────────────────────────────────────────
+        premium = bs_price(spot, K, T, r_rate, sigma, opt_type)
+        greeks  = bs_greeks(spot, K, T, r_rate, sigma, opt_type)
+        total_premium = premium * n_contracts * 100
 
         # Moneyness
-        moneyness = price / K if K > 0 else 1.0
-        if abs(moneyness - 1) < 0.02:
-            money_lbl, money_col = "AT THE MONEY", "#ffd700"
-        elif (opt_type == "call" and moneyness > 1) or (opt_type == "put" and moneyness < 1):
-            money_lbl, money_col = "IN THE MONEY", "#00ff88"
+        ratio = spot / K if K > 0 else 1.0
+        if opt_type == "call":
+            if ratio > 1.02:   mon, mon_col = "IN THE MONEY",  "#00ff88"
+            elif ratio < 0.98: mon, mon_col = "OUT THE MONEY", "#ff3b6b"
+            else:              mon, mon_col = "AT THE MONEY",  "#ffd700"
         else:
-            money_lbl, money_col = "OUT OF THE MONEY", "#ff3b6b"
+            if ratio < 0.98:   mon, mon_col = "IN THE MONEY",  "#00ff88"
+            elif ratio > 1.02: mon, mon_col = "OUT THE MONEY", "#ff3b6b"
+            else:              mon, mon_col = "AT THE MONEY",  "#ffd700"
 
         st.markdown(
-            f'<div style="text-align:center;margin-bottom:12px;">'
-            f'<span style="background:rgba(0,212,255,.1);border:1px solid rgba(0,212,255,.3);'
-            f'border-radius:4px;padding:3px 12px;font-family:Rajdhani;font-size:.75rem;'
-            f'color:{money_col};font-weight:700;letter-spacing:.12em;">{money_lbl}</span>'
-            f'</div>', unsafe_allow_html=True)
+            f'<div style="background:rgba(0,0,0,.3);border:1px solid rgba(0,212,255,.2);'
+            f'border-radius:8px;padding:14px;margin-bottom:10px;">'
+            f'<div style="display:flex;justify-content:space-between;align-items:center;'
+            f'margin-bottom:10px;">'
+            f'<div style="font-family:Rajdhani;font-size:1rem;font-weight:700;color:#00d4ff;">'
+            f'PRIME (PAR ACTION)</div>'
+            f'<span style="font-family:Rajdhani;font-size:.72rem;font-weight:700;'
+            f'color:{mon_col};background:{mon_col}22;border:1px solid {mon_col}44;'
+            f'padding:2px 8px;border-radius:3px;">{mon}</span>'
+            f'</div>'
+            f'<div style="font-family:Share Tech Mono;font-size:2rem;color:#7c3aed;'
+            f'font-weight:bold;">${premium:,.4f}</div>'
+            f'<div style="font-family:Share Tech Mono;font-size:.8rem;color:#7a93b0;'
+            f'margin-top:4px;">TOTAL ({n_contracts} contrat(s)) : '
+            f'<b style="color:#e2e8f0;">${total_premium:,.2f}</b></div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
-        metric_row([
-            {"label": "Prime (par action)", "value": f"${premium:,.4f}", "color": ""},
-            {"label": f"Total ({n_contracts} contrat{'s' if n_contracts>1 else ''})",
-             "value": f"${total_premium:,.2f}", "color": ""},
-        ])
-        st.markdown("<br>", unsafe_allow_html=True)
+        # Greeks cards
+        greek_data = [
+            ("Δ DELTA",  f'{greeks["delta"]:+.4f}', "Sensibilité au prix spot",  "#00d4ff"),
+            ("Γ GAMMA",  f'{greeks["gamma"]:.6f}',  "Convexité du delta",        "#00ff88"),
+            ("Θ THETA",  f'{greeks["theta"]:+.4f}$/j', "Décroissance temporelle", "#ff3b6b"),
+            ("ν VEGA",   f'{greeks["vega"]:+.4f}$/1%', "Sensibilité à la vol",   "#ff8c00"),
+            ("ρ RHO",    f'{greeks["rho"]:+.4f}$/1%',  "Sensibilité aux taux",   "#7c3aed"),
+        ]
+        g_cols = st.columns(2)
+        for i, (gname, gval, gdesc, gcol) in enumerate(greek_data):
+            val_float = float(gval.replace("+","").replace("$","").replace("/j","").replace("/1%",""))
+            sign_col  = "#00ff88" if val_float >= 0 else "#ff3b6b"
+            with g_cols[i % 2]:
+                st.markdown(
+                    f'<div style="background:rgba(0,0,0,.2);border:1px solid rgba(255,255,255,.06);'
+                    f'border-radius:6px;padding:8px 10px;margin:3px 0;">'
+                    f'<div style="font-family:Rajdhani;font-size:.68rem;color:{gcol};'
+                    f'font-weight:700;letter-spacing:.08em;">{gname}</div>'
+                    f'<div style="font-family:Share Tech Mono;font-size:.82rem;'
+                    f'color:{sign_col};font-weight:bold;">{gval}</div>'
+                    f'<div style="font-family:Share Tech Mono;font-size:.65rem;'
+                    f'color:#475569;">{gdesc}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
 
-        # Greeks display
-        g = greeks
-        def greek_card(name, val, unit="", desc=""):
-            col = "#00ff88" if val > 0 else ("#ff3b6b" if val < 0 else "#ffd700")
-            return (f'<div style="background:rgba(0,0,0,.2);border:1px solid rgba(255,255,255,.06);'
-                    f'border-radius:6px;padding:10px;margin:4px 0;">'
-                    f'<div style="font-family:Rajdhani;font-size:.65rem;color:#7a93b0;letter-spacing:.1em;">{name}</div>'
-                    f'<div style="font-family:Share Tech Mono;font-size:1.05rem;color:{col};font-weight:bold;">'
-                    f'{val:+.4f}{unit}</div>'
-                    f'<div style="font-family:Share Tech Mono;font-size:.65rem;color:#475569;">{desc}</div>'
-                    f'</div>')
+    # ── Implied Vol Calculator ─────────────────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    col_iv, col_payoff = st.columns(2)
 
-        st.markdown(
-            f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">'
-            + greek_card("Δ DELTA",  g["delta"], "",    "Sensibilité au prix spot")
-            + greek_card("Γ GAMMA",  g["gamma"], "",    "Convexité du delta")
-            + greek_card("Θ THETA",  g["theta"], "$/j", "Décroissance temporelle")
-            + greek_card("ν VEGA",   g["vega"],  "/$%", "Sensibilité à la vol.")
-            + greek_card("ρ RHO",    g["rho"],   "/$%", "Sensibilité aux taux")
-            + '</div>', unsafe_allow_html=True)
-
-        # Implied vol calculator
-        st.markdown("<br>", unsafe_allow_html=True)
+    with col_iv:
         section_title("CALCULATEUR VOL IMPLICITE", "🔍")
-        mkt_price = st.number_input("Prix de marché observé ($)", 0.01, 10000.0,
-                                     max(premium, 0.01), 0.01, key="opt_mkt_px")
-        iv = implied_vol(mkt_price, price, K, T, r, opt_type)
-        if iv:
+        mkt_price = st.number_input(
+            "Prix de marché observé ($)", 0.01, 1e6,
+            max(round(premium, 4), 0.01), key="iv_mkt",
+        )
+        iv = implied_vol(mkt_price, spot, K, T, r_rate, opt_type)
+        if iv is not None:
+            iv_col = "#00ff88" if iv < sigma else "#ff3b6b"
             st.markdown(
                 f'<div style="background:rgba(124,58,237,.08);border:1px solid rgba(124,58,237,.3);'
-                f'border-radius:6px;padding:10px;text-align:center;">'
-                f'<div style="font-family:Rajdhani;font-size:.68rem;color:#7a93b0;letter-spacing:.1em;">VOL IMPLICITE</div>'
-                f'<div style="font-family:Share Tech Mono;font-size:1.8rem;color:#a78bfa;font-weight:bold;">'
-                f'{iv*100:.2f}%</div></div>', unsafe_allow_html=True)
+                f'border-radius:6px;padding:12px;text-align:center;">'
+                f'<div style="font-family:Rajdhani;font-size:.7rem;color:#7a93b0;'
+                f'letter-spacing:.15em;text-transform:uppercase;">VOL IMPLICITE</div>'
+                f'<div style="font-family:Share Tech Mono;font-size:2rem;'
+                f'color:{iv_col};font-weight:bold;">{iv*100:.2f}%</div>'
+                f'<div style="font-family:Share Tech Mono;font-size:.72rem;color:#475569;">'
+                f'vs vol entrée {sigma*100:.2f}%</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
         else:
-            st.warning("Vol. implicite incalculable avec ces paramètres.")
+            st.warning("Impossible de calculer la vol implicite pour ce prix.")
 
-    # ── Payoff diagram ────────────────────────────────────────────────────────
+    with col_payoff:
+        section_title("PAYOFF À L'EXPIRATION", "📉")
+        lo    = max(spot * 0.6, 0.01)
+        hi    = spot * 1.4
+        spots = np.linspace(lo, hi, 400)
+
+        if opt_type == "call":
+            pnl = n_contracts * 100 * (np.maximum(spots - K, 0) - premium)
+        else:
+            pnl = n_contracts * 100 * (np.maximum(K - spots, 0) - premium)
+
+        pnl_pos = np.where(pnl >= 0, pnl, 0)
+        pnl_neg = np.where(pnl <  0, pnl, 0)
+
+        fig2 = go.Figure()
+        # FIX: use add_trace instead of add_fill (wrong Plotly API)
+        fig2.add_trace(go.Scatter(
+            x=spots, y=pnl_pos, fill="tozeroy",
+            fillcolor="rgba(0,255,136,.12)",
+            line=dict(color="rgba(0,0,0,0)", width=0),
+            showlegend=False, hoverinfo="skip",
+        ))
+        fig2.add_trace(go.Scatter(
+            x=spots, y=pnl_neg, fill="tozeroy",
+            fillcolor="rgba(255,59,107,.12)",
+            line=dict(color="rgba(0,0,0,0)", width=0),
+            showlegend=False, hoverinfo="skip",
+        ))
+        fig2.add_trace(go.Scatter(
+            x=spots, y=pnl, mode="lines",
+            line=dict(color="#7c3aed", width=2.5),
+            name="P&L",
+            hovertemplate="Spot: $%{x:.2f}<br>P&L: $%{y:,.2f}<extra></extra>",
+        ))
+        fig2.add_hline(y=0, line_color="rgba(255,255,255,.2)", line_width=1)
+        fig2.add_vline(x=spot, line_dash="dot", line_color="#ffd700",
+                       annotation_text=f"S=${spot:.1f}",
+                       annotation_font_color="#ffd700")
+        fig2.add_vline(x=K, line_dash="dash", line_color="rgba(255,255,255,.3)",
+                       annotation_text=f"K=${K:.1f}",
+                       annotation_font_color="rgba(255,255,255,.5)")
+        # Breakeven
+        sign_changes = np.where(np.diff(np.sign(pnl)))[0]
+        for idx in sign_changes:
+            be = (spots[idx] + spots[idx + 1]) / 2
+            fig2.add_vline(x=be, line_color="#ff8c00", line_dash="dot",
+                           annotation_text=f"BE ${be:.1f}",
+                           annotation_font_color="#ff8c00",
+                           annotation_position="bottom right")
+        fig2.update_layout(**_P, height=220,
+            xaxis=dict(title="Prix ($)", gridcolor="rgba(255,255,255,.04)"),
+            yaxis=dict(title="P&L ($)", gridcolor="rgba(255,255,255,.04)"))
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  OPTIONS ORDER  — FIX: proper submit button with validation
+    # ══════════════════════════════════════════════════════════════════════════
     st.markdown("<br>", unsafe_allow_html=True)
-    section_title("DIAGRAMME DE PAYOFF À L'EXPIRATION", "📉")
-    spots = np.linspace(max(price * 0.5, 0.01), price * 1.5, 300)
-    leg   = [{"type": opt_type, "K": K, "qty": 1, "premium": premium}]
-    pnl   = payoff_at_expiry(leg, spots)
+    section_title("PASSER UN ORDRE SUR OPTION", "✅")
 
-    # Split into profit/loss zones for coloring
-    pnl_pos = np.where(pnl >= 0, pnl, np.nan)
-    pnl_neg = np.where(pnl < 0,  pnl, np.nan)
+    opt_action = st.radio(
+        "Sens de l'ordre",
+        ["🟢 ACHETER (Long)", "🔴 VENDRE (Short / Write)"],
+        horizontal=True, key="opt_action",
+    )
+    is_buy_opt  = "ACHETER" in opt_action
+    cost_or_rec = total_premium  # positive = cost if buying, revenue if selling
+    cash        = port.get("cash", 0.0)
 
-    fig = go.Figure()
-    # Profit area (green fill)
-    fig.add_trace(go.Scatter(
-        x=spots, y=pnl_pos,
-        mode="lines", line=dict(color="rgba(0,255,136,0)", width=0),
-        fill="tozeroy", fillcolor="rgba(0,255,136,.08)",
-        showlegend=False, hoverinfo="skip"))
-    # Loss area (red fill)
-    fig.add_trace(go.Scatter(
-        x=spots, y=pnl_neg,
-        mode="lines", line=dict(color="rgba(255,59,107,0)", width=0),
-        fill="tozeroy", fillcolor="rgba(255,59,107,.08)",
-        showlegend=False, hoverinfo="skip"))
-    # Main P&L line
-    fig.add_trace(go.Scatter(
-        x=spots, y=pnl,
-        mode="lines", line=dict(color="#00d4ff", width=2.5),
-        name="P&L",
-        hovertemplate="Spot: $%{x:,.2f}<br>P&L: $%{y:,.2f}<extra></extra>"))
-    fig.add_hline(y=0, line_color="rgba(255,255,255,.3)", line_dash="dot")
-    fig.add_vline(x=price, line_color="#ffd700", line_dash="dash",
-                  annotation_text=f"Spot ${price:,.2f}", annotation_font_color="#ffd700")
-    fig.add_vline(x=K, line_color="#ff3b6b", line_dash="dot",
-                  annotation_text=f"Strike ${K:,.2f}", annotation_font_color="#ff3b6b")
-    fig.update_layout(**_P, height=280,
-        xaxis=dict(title="Prix spot à l'expiration ($)", gridcolor="rgba(255,255,255,.04)"),
-        yaxis=dict(title="P&L par action ($)", gridcolor="rgba(255,255,255,.04)"))
-    st.plotly_chart(fig, use_container_width=True)
+    # Option position summary
+    col_sum1, col_sum2 = st.columns(2)
+    with col_sum1:
+        st.markdown(
+            f'<div style="background:rgba(0,0,0,.25);border:1px solid rgba(255,255,255,.08);'
+            f'border-radius:6px;padding:12px 14px;font-family:Share Tech Mono;font-size:.8rem;">'
+            f'<div style="color:#7a93b0;font-family:Rajdhani;font-size:.7rem;'
+            f'letter-spacing:.12em;text-transform:uppercase;margin-bottom:8px;">'
+            f'Récapitulatif option</div>'
+            f'Sens : <span style="color:{"#00ff88" if is_buy_opt else "#ff3b6b"};font-weight:bold;">'
+            f'{"LONG (Acheteur)" if is_buy_opt else "SHORT (Vendeur)"}</span><br>'
+            f'Type : <b style="color:#7c3aed;">{opt_type.upper()}</b><br>'
+            f'Sous-jacent : <b style="color:#00d4ff;">{ticker}</b><br>'
+            f'Strike : <b>K = ${K:,.2f}</b><br>'
+            f'Maturité : <b>{T_days} jours ({T:.3f} an)</b><br>'
+            f'Vol. impl. : <b>{sigma*100:.1f}%</b><br>'
+            f'Contrats : <b style="color:#ffd700;">{n_contracts} × 100 = {n_contracts*100} actions</b><br>'
+            f'Prime / action : <b style="color:#7c3aed;">${premium:,.4f}</b><br>'
+            f'<b style="color:#ffd700;">{"Coût total" if is_buy_opt else "Prime reçue"} : '
+            f'${total_premium:,.2f}</b>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
-    # ── Options strategy payoff ───────────────────────────────────────────────
-    st.markdown("<br>", unsafe_allow_html=True)
-    section_title("STRATÉGIES OPTIONS — PAYOFF MULTI-JAMBES", "🧩")
-    strategy_names = list(STRATEGY_META.keys())
-    strat_sel = st.selectbox("Stratégie", strategy_names, key="opt_strat")
-    strat_sig2 = st.slider("Volatilité stratégie (%)", 5.0, 100.0, 25.0, 0.5, key="opt_sig2") / 100
-    T_strat    = st.slider("Maturité stratégie (jours)", 7, 365, 60, key="opt_T2") / 365.0
+    with col_sum2:
+        # Risk/reward summary
+        if opt_type == "call" and is_buy_opt:
+            max_loss = total_premium
+            max_gain = "Illimité"
+            be_price = K + premium
+        elif opt_type == "put" and is_buy_opt:
+            max_loss = total_premium
+            max_gain = f"${(K - premium) * n_contracts * 100:,.0f}"
+            be_price = K - premium
+        elif opt_type == "call" and not is_buy_opt:
+            max_loss = "Illimité"
+            max_gain = total_premium
+            be_price = K + premium
+        else:  # put + short
+            max_loss = f"${(K - premium) * n_contracts * 100:,.0f}"
+            max_gain = total_premium
+            be_price = K - premium
 
-    legs   = build_strategy_legs(strat_sel, price, K, T_strat, r, strat_sig2)
-    spots2 = np.linspace(max(price * 0.6, 0.01), price * 1.4, 400)
-    pnl2   = payoff_at_expiry(legs, spots2)
+        st.markdown(
+            f'<div style="background:rgba(124,58,237,.06);border:1px solid rgba(124,58,237,.2);'
+            f'border-radius:6px;padding:12px 14px;font-family:Share Tech Mono;font-size:.8rem;">'
+            f'<div style="color:#7a93b0;font-family:Rajdhani;font-size:.7rem;'
+            f'letter-spacing:.12em;text-transform:uppercase;margin-bottom:8px;">'
+            f'Profil risque/rendement</div>'
+            f'Gain max : <span style="color:#00ff88;font-weight:bold;">'
+            f'{max_gain if isinstance(max_gain, str) else f"${max_gain:,.2f}"}</span><br>'
+            f'Perte max : <span style="color:#ff3b6b;font-weight:bold;">'
+            f'{max_loss if isinstance(max_loss, str) else f"${max_loss:,.2f}"}</span><br>'
+            f'Seuil de rentabilité : <span style="color:#ff8c00;">${be_price:,.2f}</span><br>'
+            f'Cash disponible : <span style="color:#00d4ff;">${cash:,.2f}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
-    meta = STRATEGY_META.get(strat_sel, {})
-    st.markdown(
-        f'<div style="background:rgba(0,0,0,.2);border-left:3px solid {meta.get("color","#00d4ff")};'
-        f'padding:8px 14px;margin-bottom:10px;font-family:Share Tech Mono;font-size:.75rem;color:#94a3b8;">'
-        f'<b style="color:{meta.get("color","#00d4ff")};">{meta.get("cat","")}</b> — {meta.get("use","")}'
-        f'</div>', unsafe_allow_html=True)
+    # Validation errors
+    opt_errors = []
+    if is_buy_opt and total_premium > cash + 0.01:
+        opt_errors.append(
+            f"❌ Fonds insuffisants pour payer la prime "
+            f"(besoin: ${total_premium:,.2f}, cash: ${cash:,.2f})"
+        )
+    if n_contracts <= 0:
+        opt_errors.append("❌ Nombre de contrats invalide")
+    if K <= 0:
+        opt_errors.append("❌ Strike invalide (K > 0 requis)")
 
-    color = meta.get("color", "#00d4ff")
+    for err in opt_errors:
+        st.markdown(
+            f'<div style="background:rgba(255,59,107,.1);border:1px solid rgba(255,59,107,.3);'
+            f'border-radius:4px;padding:8px 12px;font-family:Share Tech Mono;'
+            f'font-size:.78rem;color:#ff3b6b;margin:4px 0;">{err}</div>',
+            unsafe_allow_html=True,
+        )
 
-    pnl2_pos = np.where(pnl2 >= 0, pnl2, np.nan)
-    pnl2_neg = np.where(pnl2 < 0,  pnl2, np.nan)
+    # ── THE FIX: actual submit button for options ──────────────────────────────
+    btn_label = (
+        f'{"✅ ACHETER" if is_buy_opt else "🔴 VENDRE"} '
+        f'{n_contracts} contrat(s) {opt_type.upper()} '
+        f'K=${K:.2f} — Prime ${total_premium:,.2f}'
+    )
 
-    fig2 = go.Figure()
-    # Profit fill
-    fig2.add_trace(go.Scatter(
-        x=spots2, y=pnl2_pos,
-        mode="lines", line=dict(width=0, color="rgba(0,255,136,0)"),
-        fill="tozeroy", fillcolor="rgba(0,255,136,.07)",
-        showlegend=False, hoverinfo="skip"))
-    # Loss fill
-    fig2.add_trace(go.Scatter(
-        x=spots2, y=pnl2_neg,
-        mode="lines", line=dict(width=0, color="rgba(255,59,107,0)"),
-        fill="tozeroy", fillcolor="rgba(255,59,107,.07)",
-        showlegend=False, hoverinfo="skip"))
-    # Main line
-    fig2.add_trace(go.Scatter(
-        x=spots2, y=pnl2,
-        mode="lines", line=dict(color=color, width=2.5),
-        name=strat_sel,
-        hovertemplate="Spot: $%{x:,.2f}<br>P&L: $%{y:,.2f}<extra></extra>"))
-    fig2.add_hline(y=0, line_color="rgba(255,255,255,.3)")
-    fig2.add_vline(x=price, line_color="#ffd700", line_dash="dash",
-                   annotation_text=f"Spot ${price:,.2f}", annotation_font_color="#ffd700")
-    fig2.update_layout(**_P, height=280,
-        title=dict(text=strat_sel, font=dict(size=13, color=color), x=0.01),
-        xaxis=dict(title="Prix spot à l'expiration ($)", gridcolor="rgba(255,255,255,.04)"),
-        yaxis=dict(title="P&L ($)", gridcolor="rgba(255,255,255,.04)"))
-    st.plotly_chart(fig2, use_container_width=True)
-
-    # Legs detail table
-    section_title("DÉTAIL DES JAMBES", "📋")
-    legs_data = []
-    for i, leg in enumerate(legs):
-        prem = leg.get("premium", 0)
-        legs_data.append({
-            "Jambe": i + 1,
-            "Type": leg["type"].upper(),
-            "Direction": "LONG" if leg.get("qty", 1) > 0 else "SHORT",
-            "Strike": f"${leg.get('K', price):,.2f}" if leg["type"] != "stock" else "—",
-            "Prime": f"${prem:,.4f}",
-            "Coût / Crédit": f'{"Débit" if leg.get("qty",1)>0 else "Crédit"} ${abs(prem):,.4f}',
+    if st.button(btn_label, disabled=len(opt_errors) > 0, key="opt_submit", type="primary"):
+        # Record option position
+        opt_positions = port.setdefault("options", [])
+        opt_positions.append({
+            "date":        datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "ticker":      ticker,
+            "type":        opt_type,
+            "action":      "BUY" if is_buy_opt else "SELL",
+            "strike":      round(K, 4),
+            "maturity_days": T_days,
+            "sigma":       round(sigma * 100, 2),
+            "n_contracts": n_contracts,
+            "premium":     round(premium, 6),
+            "total_premium": round(total_premium, 2),
+            "spot_at_entry": round(spot, 4),
         })
-    if legs_data:
-        df_legs = pd.DataFrame(legs_data)
-        st.dataframe(df_legs, use_container_width=True, hide_index=True)
+
+        # Deduct/add premium from/to cash
+        if is_buy_opt:
+            port["cash"] = port.get("cash", 0) - total_premium
+        else:
+            port["cash"] = port.get("cash", 0) + total_premium
+
+        # Record as trade
+        port.setdefault("trades", []).append({
+            "date":   datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "ticker": f"{ticker} {opt_type.upper()} K={K:.2f}",
+            "action": "BUY OPTION" if is_buy_opt else "SELL OPTION",
+            "qty":    n_contracts,
+            "price":  round(premium, 6),
+            "total":  round(total_premium, 2),
+        })
+
+        persist()
+        action_str = "Achat" if is_buy_opt else "Vente"
+        st.success(
+            f"✅ {action_str} option exécuté : {n_contracts} contrat(s) "
+            f"{opt_type.upper()} K=${K:.2f} sur {ticker} | "
+            f"Prime : ${total_premium:,.2f}"
+        )
+        st.rerun()
+
+    # ── Existing option positions ──────────────────────────────────────────────
+    opt_pos = port.get("options", [])
+    if opt_pos:
+        st.markdown("<br>", unsafe_allow_html=True)
+        section_title("POSITIONS OPTIONS OUVERTES", "📋")
+        opt_df = pd.DataFrame(opt_pos)
+        st.dataframe(opt_df, use_container_width=True, hide_index=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-def _order_book(port):
-    section_title("HISTORIQUE DES TRANSACTIONS", "📋")
+# ══════════════════════════════════════════════════════════════════════════════
+#  ALL POSITIONS (cross-portfolio view)
+# ══════════════════════════════════════════════════════════════════════════════
 
-    trades = port.get("trades", [])
-    if not trades:
-        st.info("Aucune transaction enregistrée. Commencez à trader !")
+def _all_positions(teams, assets_df):
+    section_title("TOUTES LES POSITIONS — PORTEFEUILLE ACTIF", "📋")
+
+    team_id = st.session_state.get("active_team")
+    port_id = st.session_state.get("active_portfolio")
+
+    if not team_id or not port_id:
+        st.info("Sélectionnez un portefeuille.")
         return
 
-    df = pd.DataFrame(trades[::-1])
+    port = teams.get(team_id, {}).get("portfolios", {}).get(port_id, {})
+    if not port:
+        st.info("Portefeuille introuvable.")
+        return
 
-    # Stats
-    buys  = df[df["action"] == "BUY"]
-    sells = df[df["action"] == "SELL"]
-    metric_row([
-        {"label": "Total trades",    "value": str(len(df)), "color": ""},
-        {"label": "Achats (BUY)",    "value": str(len(buys)), "color": "positive"},
-        {"label": "Ventes (SELL)",   "value": str(len(sells)), "color": "negative"},
-        {"label": "Volume total",    "value": f'${df["total"].sum():,.0f}', "color": ""},
-    ])
+    holdings = port.get("holdings", {})
+    if not holdings:
+        st.info("Aucune position spot ouverte. Rendez-vous sur l'onglet Spot Trading.")
+        return
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    tickers = tuple(holdings.keys())
+    prices  = get_multi_prices(tickers)
 
-    # HTML styled table
-    hdr = ["Date", "Ticker", "Action", "Quantité", "Prix", "Total"]
+    hdr = ["Ticker", "Quantité", "Px moy.", "Px actuel", "Var. 1j",
+           "Valeur marché", "P&L ($)", "P&L (%)"]
     th  = "".join(
-        f'<th style="font-family:Rajdhani;font-size:.67rem;color:#00d4ff;'
-        f'letter-spacing:.1em;text-transform:uppercase;padding:7px 10px;'
-        f'background:rgba(0,212,255,.06);border-bottom:1px solid rgba(0,212,255,.18);">'
+        f'<th style="font-family:Rajdhani;font-size:.66rem;color:#00d4ff;'
+        f'letter-spacing:.09em;text-transform:uppercase;padding:7px 9px;'
+        f'background:rgba(0,212,255,.06);border-bottom:1px solid rgba(0,212,255,.15);">'
         f'{c}</th>' for c in hdr)
 
     tbody = ""
-    for _, row in df.iterrows():
-        act_col = "#00ff88" if row.get("action") == "BUY" else "#ff3b6b"
+    total_val = 0.0
+    total_pnl = 0.0
+
+    for ticker, pos in holdings.items():
+        qty = pos.get("qty", 0)
+        avg = pos.get("avg_price", 0.0)
+        curr, pct_d = prices.get(ticker, (avg, 0.0))
+        mkt  = qty * curr
+        cost = qty * avg
+        pnl  = mkt - cost
+        ppct = pnl / cost * 100 if cost else 0.0
+
+        total_val += mkt
+        total_pnl += pnl
+
+        pc   = "pnl-pos" if pnl > 0 else ("pnl-neg" if pnl < 0 else "pnl-zero")
+        vc   = "pnl-pos" if pct_d > 0 else ("pnl-neg" if pct_d < 0 else "pnl-zero")
+        sg   = "+" if pnl > 0 else ""
+        ar   = "▲" if pnl > 0 else ("▼" if pnl < 0 else "▬")
+        vr   = "▲" if pct_d > 0 else ("▼" if pct_d < 0 else "▬")
+
         tbody += (
-            f'<tr style="border-bottom:1px solid rgba(255,255,255,.04);">'
-            f'<td style="padding:7px 10px;color:#7a93b0;font-size:.76rem;">{row.get("date","—")}</td>'
-            f'<td style="padding:7px 10px;color:#00d4ff;font-weight:bold;">{row.get("ticker","—")}</td>'
-            f'<td style="padding:7px 10px;color:{act_col};font-weight:bold;">{row.get("action","—")}</td>'
-            f'<td style="padding:7px 10px;">{float(row.get("qty",0)):,.4f}</td>'
-            f'<td style="padding:7px 10px;">${float(row.get("price",0)):,.4f}</td>'
-            f'<td style="padding:7px 10px;color:#ffd700;">${float(row.get("total",0)):,.2f}</td>'
+            f'<tr style="border-bottom:1px solid rgba(255,255,255,.03);">'
+            f'<td style="padding:7px 9px;color:#00d4ff;font-weight:bold;">{ticker}</td>'
+            f'<td style="padding:7px 9px;">{qty:,.4f}</td>'
+            f'<td style="padding:7px 9px;color:#7a93b0;">${avg:,.4f}</td>'
+            f'<td style="padding:7px 9px;">${curr:,.4f}</td>'
+            f'<td style="padding:7px 9px;" class="{vc}">{vr} {abs(pct_d):.2f}%</td>'
+            f'<td style="padding:7px 9px;">${mkt:,.0f}</td>'
+            f'<td style="padding:7px 9px;" class="{pc}">{sg}${abs(pnl):,.2f}</td>'
+            f'<td style="padding:7px 9px;" class="{pc}">{ar} {abs(ppct):.2f}%</td>'
             f'</tr>'
         )
 
-    st.markdown(
-        f'<div class="mam-table-wrap"><table class="mam-table">'
-        f'<thead><tr>{th}</tr></thead><tbody>{tbody}</tbody></table></div>',
-        unsafe_allow_html=True)
+    # Totals footer
+    tc   = "pnl-pos" if total_pnl > 0 else ("pnl-neg" if total_pnl < 0 else "pnl-zero")
+    tsg  = "+" if total_pnl > 0 else ""
+    tbody += (
+        f'<tr style="background:rgba(0,212,255,.05);border-top:1px solid rgba(0,212,255,.2);">'
+        f'<td colspan="5" style="padding:7px 9px;font-family:Rajdhani;font-size:.78rem;'
+        f'color:#7a93b0;letter-spacing:.1em;text-transform:uppercase;">'
+        f'TOTAL ({len(holdings)} positions)</td>'
+        f'<td style="padding:7px 9px;color:#e2e8f0;font-weight:bold;">${total_val:,.0f}</td>'
+        f'<td style="padding:7px 9px;" class="{tc}">{tsg}${abs(total_pnl):,.2f}</td>'
+        f'<td></td>'
+        f'</tr>'
+    )
 
-    # Trade volume over time
-    if len(df) > 1 and "date" in df.columns:
-        st.markdown("<br>", unsafe_allow_html=True)
-        section_title("VOLUME PAR DATE", "📊")
-        try:
-            df["date_only"] = pd.to_datetime(df["date"]).dt.date
-            vol_by_date = df.groupby("date_only")["total"].sum().reset_index()
-            fig = go.Figure(go.Bar(
-                x=vol_by_date["date_only"].astype(str),
-                y=vol_by_date["total"],
-                marker_color="rgba(0,212,255,.6)",
-                hovertemplate="%{x}<br>Volume: $%{y:,.0f}<extra></extra>"))
-            fig.update_layout(**_P, height=200,
-                xaxis=dict(showgrid=False),
-                yaxis=dict(title="Volume ($)", gridcolor="rgba(255,255,255,.04)"))
-            st.plotly_chart(fig, use_container_width=True)
-        except Exception:
-            pass
+    st.markdown(
+        f'<div style="overflow-x:auto;border:1px solid rgba(0,212,255,.15);border-radius:8px;">'
+        f'<table style="width:100%;border-collapse:collapse;font-family:Share Tech Mono;'
+        f'font-size:.78rem;color:#e2e8f0;">'
+        f'<thead><tr>{th}</tr></thead><tbody>{tbody}</tbody></table></div>',
+        unsafe_allow_html=True,
+    )
+
+    # Recent trades
+    section_title("HISTORIQUE DES TRANSACTIONS", "🔄")
+    trades = port.get("trades", [])
+    if trades:
+        df = pd.DataFrame(trades[-30:][::-1])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Aucune transaction enregistrée.")
