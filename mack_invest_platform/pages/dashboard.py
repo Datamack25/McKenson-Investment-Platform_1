@@ -24,9 +24,10 @@ _P = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
 
 
 def render():
+    # ── FIX 2 : bandeau abaissé via margin-top ────────────────────────────────
     st.markdown(
         '<h1 style="font-family:Rajdhani,sans-serif;font-size:2rem;letter-spacing:.12em;'
-        'color:#00d4ff;margin:0 0 2px;text-shadow:0 0 30px rgba(0,212,255,.4);">'
+        'color:#00d4ff;margin:48px 0 2px;text-shadow:0 0 30px rgba(0,212,255,.4);">'
         '🏠 DASHBOARD — MAM</h1>', unsafe_allow_html=True)
 
     state   = get_or_init_state()
@@ -88,25 +89,31 @@ def _no_teams_placeholder():
 def _global_view(teams: dict, prices_dict: dict):
     section_title("VUE GLOBALE — TOUTES LES ÉQUIPES", "🌐")
 
-    # Aggregate all portfolios
-    all_rows = []
-    team_agg = []
+    # ── FIX 3 : n'agréger QUE les portefeuilles réellement créés ──────────────
+    # Un portefeuille est "réel" s'il a été créé explicitement (a un nom non vide)
+    all_rows  = []
+    team_agg  = []
 
     for tid, team in teams.items():
         team_total = 0.0
         team_init  = 0.0
+
         for pid, port in team["portfolios"].items():
-            val       = value_portfolio(port, prices_dict)
-            total     = val["total"]
-            init      = float(port.get("initial_cash", 1_000_000))
-            pnl       = total - init
-            pct       = pnl / init * 100 if init else 0
-            n_trades  = len(port.get("trades", []))
-            n_pos     = len(val["positions"])
+            # Ignorer les portefeuilles vides / placeholders sans nom
+            if not port.get("name", "").strip():
+                continue
+
+            val      = value_portfolio(port, prices_dict)
+            total    = val["total"]
+            init     = float(port.get("initial_cash", 1_000_000))
+            pnl      = total - init
+            pct      = pnl / init * 100 if init else 0
+            n_trades = len(port.get("trades", []))
+            n_pos    = len(val["positions"])
 
             all_rows.append({
                 "team": team["name"], "team_emoji": team["emoji"],
-                "port": port["name"], "port_emoji": port["emoji"],
+                "port": port["name"], "port_emoji": port.get("emoji", "💼"),
                 "strategy": port.get("strategy", ""),
                 "total": total, "init": init,
                 "pnl": pnl, "pct": pct,
@@ -116,11 +123,12 @@ def _global_view(teams: dict, prices_dict: dict):
             team_total += total
             team_init  += init
 
-        team_agg.append({
-            "name": team["name"], "emoji": team["emoji"],
-            "total": team_total, "pnl": team_total - team_init,
-            "pct": (team_total - team_init) / team_init * 100 if team_init else 0,
-        })
+        if team_total > 0 or team_init > 0:
+            team_agg.append({
+                "name": team["name"], "emoji": team["emoji"],
+                "total": team_total, "pnl": team_total - team_init,
+                "pct": (team_total - team_init) / team_init * 100 if team_init else 0,
+            })
 
     # ── Top summary strip ──────────────────────────────────────────────────────
     total_aum    = sum(r["total"] for r in all_rows)
@@ -130,7 +138,7 @@ def _global_view(teams: dict, prices_dict: dict):
     n_profitable = sum(1 for r in all_rows if r["pnl"] > 0)
 
     metric_row([
-        {"label": "AUM Total",         "value": f"${total_aum:,.0f}",      "color": ""},
+        {"label": "AUM Total",         "value": f"${total_aum:,.0f}",  "color": ""},
         {"label": "P&L Total",         "value": f'${total_pnl:+,.0f}',
          "color": "positive" if total_pnl >= 0 else "negative"},
         {"label": "Rendement moyen",   "value": f"{total_pct:+.2f}%",
@@ -148,19 +156,23 @@ def _global_view(teams: dict, prices_dict: dict):
 
     with col_chart:
         section_title("P&L PAR ÉQUIPE", "📊")
-        fig = go.Figure(go.Bar(
-            x=[f'{t["emoji"]} {t["name"]}' for t in team_agg_sorted],
-            y=[t["pct"] for t in team_agg_sorted],
-            marker_color=["rgba(0,255,136,.7)" if t["pct"] >= 0 else "rgba(255,59,107,.7)"
-                          for t in team_agg_sorted],
-            text=[f'{"+" if t["pct"]>=0 else ""}{t["pct"]:.2f}%' for t in team_agg_sorted],
-            textposition="outside",
-            hovertemplate="%{x}<br>P&L: %{y:+.2f}%<extra></extra>"))
-        fig.add_hline(y=0, line_color="rgba(255,255,255,.2)")
-        fig.update_layout(**_P, height=240,
-            xaxis=dict(showgrid=False),
-            yaxis=dict(title="P&L (%)", gridcolor="rgba(255,255,255,.04)"))
-        st.plotly_chart(fig, use_container_width=True)
+        if team_agg_sorted:
+            fig = go.Figure(go.Bar(
+                x=[f'{t["emoji"]} {t["name"]}' for t in team_agg_sorted],
+                y=[t["pct"] for t in team_agg_sorted],
+                marker_color=["rgba(0,255,136,.7)" if t["pct"] >= 0
+                              else "rgba(255,59,107,.7)" for t in team_agg_sorted],
+                text=[f'{"+" if t["pct"]>=0 else ""}{t["pct"]:.2f}%'
+                      for t in team_agg_sorted],
+                textposition="outside",
+                hovertemplate="%{x}<br>P&L: %{y:+.2f}%<extra></extra>"))
+            fig.add_hline(y=0, line_color="rgba(255,255,255,.2)")
+            fig.update_layout(**_P, height=240,
+                xaxis=dict(showgrid=False),
+                yaxis=dict(title="P&L (%)", gridcolor="rgba(255,255,255,.04)"))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Aucun portefeuille créé.")
 
     with col_table:
         section_title("CLASSEMENT", "🏆")
@@ -181,63 +193,73 @@ def _global_view(teams: dict, prices_dict: dict):
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── All portfolios table ───────────────────────────────────────────────────
+    # ── All portfolios table (uniquement ceux réellement créés) ───────────────
     section_title("TOUS LES PORTEFEUILLES", "📋")
-    all_rows_sorted = sorted(all_rows, key=lambda x: x["pct"], reverse=True)
 
-    hdr = ["#", "Équipe", "Portefeuille", "Stratégie", "Valeur", "P&L ($)", "P&L (%)", "Cash", "Positions", "Trades"]
-    th  = "".join(
-        f'<th style="font-family:Rajdhani;font-size:.62rem;color:#00d4ff;'
-        f'letter-spacing:.08em;text-transform:uppercase;padding:7px 9px;'
-        f'background:rgba(0,212,255,.06);border-bottom:1px solid rgba(0,212,255,.18);">'
-        f'{c}</th>' for c in hdr)
+    if not all_rows:
+        st.info("Aucun portefeuille créé pour le moment.")
+    else:
+        all_rows_sorted = sorted(all_rows, key=lambda x: x["pct"], reverse=True)
 
-    tbody = ""
-    for i, r in enumerate(all_rows_sorted, 1):
-        pnl_col = "#00ff88" if r["pnl"] >= 0 else "#ff3b6b"
-        sign    = "+" if r["pnl"] >= 0 else ""
-        arr     = "▲" if r["pnl"] > 0 else "▼"
-        medal   = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else str(i)
-        tbody += (
-            f'<tr style="border-bottom:1px solid rgba(255,255,255,.04);">'
-            f'<td style="padding:6px 10px;text-align:center;">{medal}</td>'
-            f'<td style="padding:6px 9px;font-family:Rajdhani;color:#7a93b0;font-size:.75rem;">'
-            f'{r["team_emoji"]} {r["team"]}</td>'
-            f'<td style="padding:6px 9px;font-family:Rajdhani;font-weight:700;color:#e2e8f0;">'
-            f'{r["port_emoji"]} {r["port"]}</td>'
-            f'<td style="padding:6px 9px;font-family:Share Tech Mono;font-size:.68rem;color:#7a93b0;">'
-            f'{r["strategy"]}</td>'
-            f'<td style="padding:6px 9px;font-family:Share Tech Mono;">${r["total"]:,.0f}</td>'
-            f'<td style="padding:6px 9px;color:{pnl_col};font-family:Share Tech Mono;">'
-            f'{sign}${abs(r["pnl"]):,.0f}</td>'
-            f'<td style="padding:6px 9px;color:{pnl_col};font-family:Share Tech Mono;font-weight:bold;">'
-            f'{arr} {abs(r["pct"]):.2f}%</td>'
-            f'<td style="padding:6px 9px;font-family:Share Tech Mono;color:#7a93b0;">${r["cash"]:,.0f}</td>'
-            f'<td style="padding:6px 9px;color:#7a93b0;text-align:center;">{r["n_positions"]}</td>'
-            f'<td style="padding:6px 9px;color:#7a93b0;text-align:center;">{r["n_trades"]}</td>'
-            f'</tr>'
-        )
+        hdr = ["#", "Équipe", "Portefeuille", "Stratégie",
+               "Valeur", "P&L ($)", "P&L (%)", "Cash", "Positions", "Trades"]
+        th = "".join(
+            f'<th style="font-family:Rajdhani;font-size:.62rem;color:#00d4ff;'
+            f'letter-spacing:.08em;text-transform:uppercase;padding:7px 9px;'
+            f'background:rgba(0,212,255,.06);border-bottom:1px solid rgba(0,212,255,.18);">'
+            f'{c}</th>' for c in hdr)
 
-    st.markdown(
-        f'<div class="mam-table-wrap"><table class="mam-table">'
-        f'<thead><tr>{th}</tr></thead><tbody>{tbody}</tbody></table></div>',
-        unsafe_allow_html=True)
+        tbody = ""
+        for i, r in enumerate(all_rows_sorted, 1):
+            pnl_col = "#00ff88" if r["pnl"] >= 0 else "#ff3b6b"
+            sign    = "+" if r["pnl"] >= 0 else ""
+            arr     = "▲" if r["pnl"] > 0 else "▼"
+            medal   = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else str(i)
+            tbody += (
+                f'<tr style="border-bottom:1px solid rgba(255,255,255,.04);">'
+                f'<td style="padding:6px 10px;text-align:center;">{medal}</td>'
+                f'<td style="padding:6px 9px;font-family:Rajdhani;color:#7a93b0;font-size:.75rem;">'
+                f'{r["team_emoji"]} {r["team"]}</td>'
+                f'<td style="padding:6px 9px;font-family:Rajdhani;font-weight:700;color:#e2e8f0;">'
+                f'{r["port_emoji"]} {r["port"]}</td>'
+                f'<td style="padding:6px 9px;font-family:Share Tech Mono;font-size:.68rem;color:#7a93b0;">'
+                f'{r["strategy"]}</td>'
+                f'<td style="padding:6px 9px;font-family:Share Tech Mono;">${r["total"]:,.0f}</td>'
+                f'<td style="padding:6px 9px;color:{pnl_col};font-family:Share Tech Mono;">'
+                f'{sign}${abs(r["pnl"]):,.0f}</td>'
+                f'<td style="padding:6px 9px;color:{pnl_col};font-family:Share Tech Mono;font-weight:bold;">'
+                f'{arr} {abs(r["pct"]):.2f}%</td>'
+                f'<td style="padding:6px 9px;font-family:Share Tech Mono;color:#7a93b0;">'
+                f'${r["cash"]:,.0f}</td>'
+                f'<td style="padding:6px 9px;color:#7a93b0;text-align:center;">{r["n_positions"]}</td>'
+                f'<td style="padding:6px 9px;color:#7a93b0;text-align:center;">{r["n_trades"]}</td>'
+                f'</tr>'
+            )
+
+        st.markdown(
+            f'<div class="mam-table-wrap"><table class="mam-table">'
+            f'<thead><tr>{th}</tr></thead><tbody>{tbody}</tbody></table></div>',
+            unsafe_allow_html=True)
+
+    # ── FIX 3b : Comparaison par équipe ET par typologie de portefeuille ──────
+    st.markdown("<br>", unsafe_allow_html=True)
+    if all_rows:
+        _comparison_by_strategy(all_rows)
 
     # ── Holdings allocation donut (aggregated) ─────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
     section_title("RÉPARTITION GLOBALE PAR ACTIF", "🥧")
 
-    holdings_agg: dict[str, float] = {}
-    for r_row in all_rows:
-        pass  # placeholder — we use prices_dict below
-
     holdings_by_ticker: dict[str, float] = {}
     for team in teams.values():
         for port in team["portfolios"].values():
+            if not port.get("name", "").strip():
+                continue
             val = value_portfolio(port, prices_dict)
             for pos in val["positions"]:
                 t_ = pos["ticker"]
-                holdings_by_ticker[t_] = holdings_by_ticker.get(t_, 0) + pos["market_value"]
+                holdings_by_ticker[t_] = (
+                    holdings_by_ticker.get(t_, 0) + pos["market_value"])
 
     if holdings_by_ticker:
         sorted_h = sorted(holdings_by_ticker.items(), key=lambda x: x[1], reverse=True)
@@ -252,10 +274,168 @@ def _global_view(teams: dict, prices_dict: dict):
             textfont=dict(family="Share Tech Mono", size=10),
             marker=dict(colors=px.colors.qualitative.Dark24),
             hovertemplate="<b>%{label}</b><br>$%{value:,.0f} (%{percent})<extra></extra>"))
-        fig_pie.update_layout(**_P, height=320, showlegend=True,
-            title=dict(text="Exposition par ticker (toutes équipes)", font=dict(color="#00d4ff", size=12), x=0.01),
-            legend=dict(font=dict(size=9, family="Share Tech Mono"), bgcolor="rgba(0,0,0,0)"))
+        fig_pie.update_layout(
+            **_P, height=320, showlegend=True,
+            title=dict(text="Exposition par ticker (toutes équipes)",
+                       font=dict(color="#00d4ff", size=12), x=0.01),
+            legend=dict(font=dict(size=9, family="Share Tech Mono"),
+                        bgcolor="rgba(0,0,0,0)"))
         st.plotly_chart(fig_pie, use_container_width=True)
+    else:
+        st.info("Aucune position détenue pour le moment.")
+
+
+# ── FIX 3b : Comparaison par équipe et par stratégie ─────────────────────────
+def _comparison_by_strategy(all_rows: list):
+    """Tableau croisé équipe × stratégie + Sharpe approximatif."""
+    section_title("COMPARAISON PAR ÉQUIPE & TYPOLOGIE", "⚖️")
+
+    # Construire un DataFrame pivot
+    df = pd.DataFrame(all_rows)
+
+    # ── Tableau croisé P&L% : équipe (ligne) × stratégie (colonne) ───────────
+    pivot = df.pivot_table(
+        index="team", columns="strategy",
+        values="pct", aggfunc="mean"
+    ).round(2)
+
+    # Affichage HTML stylé
+    strategies = list(pivot.columns)
+    teams_list = list(pivot.index)
+
+    col_heads = "".join(
+        f'<th style="font-family:Rajdhani;font-size:.60rem;color:#00d4ff;'
+        f'letter-spacing:.07em;text-transform:uppercase;padding:7px 9px;'
+        f'background:rgba(0,212,255,.06);border-bottom:1px solid rgba(0,212,255,.18);">'
+        f'{s}</th>' for s in strategies)
+
+    th = (
+        f'<th style="font-family:Rajdhani;font-size:.60rem;color:#00d4ff;'
+        f'letter-spacing:.07em;text-transform:uppercase;padding:7px 9px;'
+        f'background:rgba(0,212,255,.06);border-bottom:1px solid rgba(0,212,255,.18);">'
+        f'ÉQUIPE</th>' + col_heads)
+
+    tbody = ""
+    for team_name in teams_list:
+        row_html = (
+            f'<td style="padding:6px 9px;font-family:Rajdhani;font-weight:700;'
+            f'color:#e2e8f0;font-size:.78rem;">'
+            # find emoji from all_rows
+            + next((r["team_emoji"] for r in all_rows if r["team"] == team_name), "")
+            + f" {team_name}</td>"
+        )
+        for strat in strategies:
+            val = pivot.loc[team_name, strat] if strat in pivot.columns else float("nan")
+            if pd.isna(val):
+                row_html += '<td style="padding:6px 9px;color:#475569;text-align:center;">—</td>'
+            else:
+                col = "#00ff88" if val >= 0 else "#ff3b6b"
+                sign = "+" if val >= 0 else ""
+                row_html += (
+                    f'<td style="padding:6px 9px;font-family:Share Tech Mono;'
+                    f'font-weight:bold;color:{col};text-align:center;">'
+                    f'{sign}{val:.2f}%</td>')
+        tbody += f'<tr style="border-bottom:1px solid rgba(255,255,255,.04);">{row_html}</tr>'
+
+    st.markdown(
+        f'<div class="mam-table-wrap"><table class="mam-table">'
+        f'<thead><tr>{th}</tr></thead><tbody>{tbody}</tbody></table></div>',
+        unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Sharpe approximatif par stratégie (barre) ─────────────────────────────
+    section_title("PERFORMANCE PAR STRATÉGIE — P&L MOYEN & SHARPE APPROX.", "📐")
+
+    strat_stats = []
+    for strat, grp in df.groupby("strategy"):
+        pcts    = grp["pct"].values
+        mean_r  = float(np.mean(pcts))
+        std_r   = float(np.std(pcts)) if len(pcts) > 1 else 0.0
+        sharpe  = mean_r / std_r if std_r > 0 else 0.0
+        best    = grp.loc[grp["pct"].idxmax(), "team"] if len(grp) > 0 else "—"
+        strat_stats.append({
+            "strategy": strat,
+            "mean_pct": mean_r,
+            "sharpe": sharpe,
+            "best_team": best,
+            "count": len(grp),
+        })
+
+    strat_stats_sorted = sorted(strat_stats, key=lambda x: x["sharpe"], reverse=True)
+
+    col_bar, col_sharpe = st.columns(2)
+
+    with col_bar:
+        section_title("P&L MOYEN PAR STRATÉGIE", "📊")
+        fig_s = go.Figure(go.Bar(
+            x=[s["strategy"] for s in strat_stats_sorted],
+            y=[s["mean_pct"] for s in strat_stats_sorted],
+            marker_color=["rgba(0,255,136,.7)" if s["mean_pct"] >= 0
+                          else "rgba(255,59,107,.7)" for s in strat_stats_sorted],
+            text=[f'{s["mean_pct"]:+.2f}%' for s in strat_stats_sorted],
+            textposition="outside",
+            hovertemplate="%{x}<br>P&L moy: %{y:+.2f}%<extra></extra>"))
+        fig_s.add_hline(y=0, line_color="rgba(255,255,255,.2)")
+        fig_s.update_layout(**_P, height=260,
+            xaxis=dict(showgrid=False, tickangle=-25),
+            yaxis=dict(title="P&L moy (%)", gridcolor="rgba(255,255,255,.04)"))
+        st.plotly_chart(fig_s, use_container_width=True)
+
+    with col_sharpe:
+        section_title("SHARPE APPROX. PAR STRATÉGIE", "⭐")
+        fig_sh = go.Figure(go.Bar(
+            x=[s["strategy"] for s in strat_stats_sorted],
+            y=[s["sharpe"] for s in strat_stats_sorted],
+            marker_color=["rgba(0,212,255,.7)" if s["sharpe"] >= 1
+                          else "rgba(124,58,237,.7)" if s["sharpe"] >= 0
+                          else "rgba(255,59,107,.7)" for s in strat_stats_sorted],
+            text=[f'{s["sharpe"]:.2f}' for s in strat_stats_sorted],
+            textposition="outside",
+            hovertemplate="%{x}<br>Sharpe: %{y:.2f}<extra></extra>"))
+        fig_sh.add_hline(y=1, line_color="rgba(255,215,0,.4)", line_dash="dot",
+                         annotation_text="Sharpe=1 (cible)",
+                         annotation_font_color="#ffd700")
+        fig_sh.add_hline(y=0, line_color="rgba(255,255,255,.15)")
+        fig_sh.update_layout(**_P, height=260,
+            xaxis=dict(showgrid=False, tickangle=-25),
+            yaxis=dict(title="Sharpe Ratio approx.", gridcolor="rgba(255,255,255,.04)"))
+        st.plotly_chart(fig_sh, use_container_width=True)
+
+    # ── Tableau récap par stratégie ───────────────────────────────────────────
+    hdr2 = ["Stratégie", "Nb Ports", "P&L Moy (%)", "Sharpe Approx.", "Meilleure équipe"]
+    th2  = "".join(
+        f'<th style="font-family:Rajdhani;font-size:.60rem;color:#00d4ff;'
+        f'letter-spacing:.07em;text-transform:uppercase;padding:7px 9px;'
+        f'background:rgba(0,212,255,.06);border-bottom:1px solid rgba(0,212,255,.18);">'
+        f'{c}</th>' for c in hdr2)
+
+    tbody2 = ""
+    for s in strat_stats_sorted:
+        pnl_col  = "#00ff88" if s["mean_pct"] >= 0 else "#ff3b6b"
+        sh_col   = "#00d4ff" if s["sharpe"] >= 1 else "#ffd700" if s["sharpe"] >= 0 else "#ff3b6b"
+        sign     = "+" if s["mean_pct"] >= 0 else ""
+        tbody2  += (
+            f'<tr style="border-bottom:1px solid rgba(255,255,255,.04);">'
+            f'<td style="padding:6px 9px;font-family:Rajdhani;font-weight:700;'
+            f'color:#e2e8f0;">{s["strategy"]}</td>'
+            f'<td style="padding:6px 9px;font-family:Share Tech Mono;'
+            f'color:#7a93b0;text-align:center;">{s["count"]}</td>'
+            f'<td style="padding:6px 9px;font-family:Share Tech Mono;'
+            f'font-weight:bold;color:{pnl_col};text-align:center;">'
+            f'{sign}{s["mean_pct"]:.2f}%</td>'
+            f'<td style="padding:6px 9px;font-family:Share Tech Mono;'
+            f'font-weight:bold;color:{sh_col};text-align:center;">'
+            f'{s["sharpe"]:.2f}</td>'
+            f'<td style="padding:6px 9px;font-family:Rajdhani;'
+            f'color:#94a3b8;">{s["best_team"]}</td>'
+            f'</tr>'
+        )
+
+    st.markdown(
+        f'<div class="mam-table-wrap"><table class="mam-table">'
+        f'<thead><tr>{th2}</tr></thead><tbody>{tbody2}</tbody></table></div>',
+        unsafe_allow_html=True)
 
 
 # ── Single portfolio view ─────────────────────────────────────────────────────
@@ -282,14 +462,14 @@ def _portfolio_view(team: dict, team_id: str, port: dict, port_id: str,
 
     # ── KPI strip ──────────────────────────────────────────────────────────────
     metric_row([
-        {"label": "Valeur totale",    "value": f"${total:,.2f}",   "color": ""},
-        {"label": "Cash disponible",  "value": f"${cash:,.2f}",    "color": ""},
-        {"label": "P&L Total",        "value": f"${pnl:+,.2f}",
+        {"label": "Valeur totale",      "value": f"${total:,.2f}",  "color": ""},
+        {"label": "Cash disponible",    "value": f"${cash:,.2f}",   "color": ""},
+        {"label": "P&L Total",          "value": f"${pnl:+,.2f}",
          "color": "positive" if pnl >= 0 else "negative"},
-        {"label": "Rendement",        "value": f"{pct:+.2f}%",
+        {"label": "Rendement",          "value": f"{pct:+.2f}%",
          "color": "positive" if pct >= 0 else "negative"},
-        {"label": "Positions ouvertes", "value": str(n_pos), "color": ""},
-        {"label": "Stratégie",        "value": port.get("strategy", "—"), "color": ""},
+        {"label": "Positions ouvertes", "value": str(n_pos),        "color": ""},
+        {"label": "Stratégie",          "value": port.get("strategy", "—"), "color": ""},
     ])
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -328,21 +508,23 @@ def _holdings_tab(val: dict, prices_dict: dict):
             unsafe_allow_html=True)
         return
 
-    total_mkt = sum(p["market_value"] for p in positions)
-    total_pnl = sum(p["unrealized_pnl"] for p in positions)
+    # ── FIX 1 : utiliser .get() pour éviter KeyError "unrealized_pnl" ─────────
+    total_mkt = sum(p.get("market_value", 0.0) for p in positions)
+    total_pnl = sum(p.get("unrealized_pnl", 0.0) for p in positions)
 
     metric_row([
-        {"label": "Positions",          "value": str(len(positions)), "color": ""},
-        {"label": "Valeur de marché",   "value": f"${total_mkt:,.2f}", "color": ""},
-        {"label": "P&L non réalisé",    "value": f"${total_pnl:+,.2f}",
+        {"label": "Positions",        "value": str(len(positions)), "color": ""},
+        {"label": "Valeur de marché", "value": f"${total_mkt:,.2f}", "color": ""},
+        {"label": "P&L non réalisé",  "value": f"${total_pnl:+,.2f}",
          "color": "positive" if total_pnl >= 0 else "negative"},
-        {"label": "Cash",               "value": f"${cash:,.2f}", "color": ""},
+        {"label": "Cash",             "value": f"${cash:,.2f}", "color": ""},
     ])
 
     st.markdown("<br>", unsafe_allow_html=True)
 
     # Holdings table
-    hdr = ["Ticker", "Quantité", "Prix moyen", "Prix marché", "Valeur marché", "P&L ($)", "P&L (%)", "Poids"]
+    hdr = ["Ticker", "Quantité", "Prix moyen", "Prix marché",
+           "Valeur marché", "P&L ($)", "P&L (%)", "Poids"]
     th  = "".join(
         f'<th style="font-family:Rajdhani;font-size:.62rem;color:#00d4ff;'
         f'letter-spacing:.08em;text-transform:uppercase;padding:7px 9px;'
@@ -351,23 +533,32 @@ def _holdings_tab(val: dict, prices_dict: dict):
 
     total_val = total_mkt + cash
     tbody = ""
-    for pos in sorted(positions, key=lambda x: x["market_value"], reverse=True):
-        pnl_col = "#00ff88" if pos["unrealized_pnl"] >= 0 else "#ff3b6b"
-        sign    = "+" if pos["unrealized_pnl"] >= 0 else ""
-        arr     = "▲" if pos["unrealized_pnl"] > 0 else "▼"
-        weight  = pos["market_value"] / total_val * 100 if total_val else 0
-        pnl_pct = (pos["price"] - pos["avg_price"]) / pos["avg_price"] * 100 if pos["avg_price"] else 0
+    for pos in sorted(positions, key=lambda x: x.get("market_value", 0), reverse=True):
+        # FIX 1 : .get() sur chaque clé potentiellement absente
+        unrealized = pos.get("unrealized_pnl", 0.0)
+        mkt_val    = pos.get("market_value",   0.0)
+        avg_price  = pos.get("avg_price",      0.0)
+        cur_price  = pos.get("price",          0.0)
+        qty        = pos.get("qty",            0.0)
+        ticker     = pos.get("ticker",         "?")
+
+        pnl_col = "#00ff88" if unrealized >= 0 else "#ff3b6b"
+        sign    = "+" if unrealized >= 0 else ""
+        arr     = "▲" if unrealized > 0 else "▼"
+        weight  = mkt_val / total_val * 100 if total_val else 0
+        pnl_pct = (cur_price - avg_price) / avg_price * 100 if avg_price else 0
 
         tbody += (
             f'<tr style="border-bottom:1px solid rgba(255,255,255,.04);">'
             f'<td style="padding:7px 9px;font-family:Rajdhani;font-size:.95rem;'
-            f'font-weight:700;color:#00d4ff;">{pos["ticker"]}</td>'
-            f'<td style="padding:7px 9px;font-family:Share Tech Mono;">{pos["qty"]:,.4f}</td>'
-            f'<td style="padding:7px 9px;font-family:Share Tech Mono;">${pos["avg_price"]:,.4f}</td>'
-            f'<td style="padding:7px 9px;font-family:Share Tech Mono;">${pos["price"]:,.4f}</td>'
-            f'<td style="padding:7px 9px;font-family:Share Tech Mono;color:#e2e8f0;">${pos["market_value"]:,.2f}</td>'
+            f'font-weight:700;color:#00d4ff;">{ticker}</td>'
+            f'<td style="padding:7px 9px;font-family:Share Tech Mono;">{qty:,.4f}</td>'
+            f'<td style="padding:7px 9px;font-family:Share Tech Mono;">${avg_price:,.4f}</td>'
+            f'<td style="padding:7px 9px;font-family:Share Tech Mono;">${cur_price:,.4f}</td>'
+            f'<td style="padding:7px 9px;font-family:Share Tech Mono;color:#e2e8f0;">'
+            f'${mkt_val:,.2f}</td>'
             f'<td style="padding:7px 9px;color:{pnl_col};font-family:Share Tech Mono;">'
-            f'{sign}${abs(pos["unrealized_pnl"]):,.2f}</td>'
+            f'{sign}${abs(unrealized):,.2f}</td>'
             f'<td style="padding:7px 9px;color:{pnl_col};font-weight:bold;">'
             f'{arr} {abs(pnl_pct):.2f}%</td>'
             f'<td style="padding:7px 9px;">'
@@ -388,8 +579,8 @@ def _holdings_tab(val: dict, prices_dict: dict):
     st.markdown("<br>", unsafe_allow_html=True)
     section_title("RÉPARTITION DU PORTEFEUILLE", "🥧")
 
-    labels = [p["ticker"] for p in positions] + ["Cash"]
-    values = [p["market_value"] for p in positions] + [cash]
+    labels = [p.get("ticker", "?") for p in positions] + ["Cash"]
+    values = [p.get("market_value", 0.0) for p in positions] + [cash]
 
     fig = go.Figure(go.Pie(
         labels=labels, values=values, hole=0.55,
@@ -415,11 +606,9 @@ def _nav_tab(history: list, current_total: float, init: float):
     df = df.sort_values("date").drop_duplicates("date")
     df["pct"] = (df["value"] / init - 1) * 100
 
-    # Benchmark: flat at 0%
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                         row_heights=[0.7, 0.3], vertical_spacing=0.04)
 
-    # NAV value
     fig.add_trace(go.Scatter(
         x=df["date"], y=df["value"],
         mode="lines+markers", marker=dict(size=4),
@@ -431,8 +620,8 @@ def _nav_tab(history: list, current_total: float, init: float):
                   annotation_text=f"Capital initial ${init:,.0f}",
                   annotation_font_color="#ffd700", row=1, col=1)
 
-    # Returns
-    pnl_colors = ["rgba(0,255,136,.6)" if v >= 0 else "rgba(255,59,107,.6)" for v in df["pct"]]
+    pnl_colors = ["rgba(0,255,136,.6)" if v >= 0 else "rgba(255,59,107,.6)"
+                  for v in df["pct"]]
     fig.add_trace(go.Bar(
         x=df["date"], y=df["pct"],
         name="Rendement (%)", marker_color=pnl_colors,
@@ -442,26 +631,24 @@ def _nav_tab(history: list, current_total: float, init: float):
 
     fig.update_layout(**_P, height=400,
         legend=dict(orientation="h", y=1.02, font=dict(size=10)),
-        yaxis=dict(title="Valeur ($)", gridcolor="rgba(255,255,255,.04)"),
+        yaxis=dict(title="Valeur ($)",     gridcolor="rgba(255,255,255,.04)"),
         yaxis2=dict(title="Rendement (%)", gridcolor="rgba(255,255,255,.04)"))
     st.plotly_chart(fig, use_container_width=True)
 
-    # Stats
     max_nav  = float(df["value"].max())
     min_nav  = float(df["value"].min())
     last_ret = float(df["pct"].iloc[-1])
 
     metric_row([
-        {"label": "NAV actuelle",  "value": f"${current_total:,.2f}", "color": ""},
-        {"label": "NAV max",       "value": f"${max_nav:,.2f}", "color": "positive"},
-        {"label": "NAV min",       "value": f"${min_nav:,.2f}", "color": "negative"},
+        {"label": "NAV actuelle",    "value": f"${current_total:,.2f}", "color": ""},
+        {"label": "NAV max",         "value": f"${max_nav:,.2f}",       "color": "positive"},
+        {"label": "NAV min",         "value": f"${min_nav:,.2f}",       "color": "negative"},
         {"label": "Rendement total", "value": f"{last_ret:+.2f}%",
          "color": "positive" if last_ret >= 0 else "negative"},
     ])
 
 
 def _nav_placeholder(total: float, init: float):
-    """Show single-point NAV placeholder."""
     pnl  = total - init
     pct  = pnl / init * 100 if init else 0
     col  = "#00ff88" if pnl >= 0 else "#ff3b6b"
@@ -484,7 +671,7 @@ def _risk_tab(history: list, port: dict):
     section_title("MÉTRIQUES DE RISQUE", "⚠️")
 
     if len(history) < 5:
-        st.info("Données insuffisantes pour le calcul des métriques de risque (min. 5 observations).")
+        st.info("Données insuffisantes pour le calcul des métriques (min. 5 observations).")
         return
 
     df      = pd.DataFrame(history).sort_values("date")
@@ -496,22 +683,21 @@ def _risk_tab(history: list, port: dict):
         return
 
     metric_row([
-        {"label": "Sharpe Ratio",   "value": f'{metrics["sharpe"]:.3f}',
+        {"label": "Sharpe Ratio",    "value": f'{metrics["sharpe"]:.3f}',
          "color": "positive" if metrics["sharpe"] >= 1 else "neutral" if metrics["sharpe"] >= 0 else "negative"},
-        {"label": "Sortino Ratio",  "value": f'{metrics["sortino"]:.3f}',
+        {"label": "Sortino Ratio",   "value": f'{metrics["sortino"]:.3f}',
          "color": "positive" if metrics["sortino"] >= 1 else "neutral"},
-        {"label": "Max Drawdown",   "value": f'{metrics["max_drawdown"]*100:.2f}%',
+        {"label": "Max Drawdown",    "value": f'{metrics["max_drawdown"]*100:.2f}%',
          "color": "negative"},
-        {"label": "Vol. annualisée","value": f'{metrics["ann_vol"]*100:.2f}%', "color": ""},
-        {"label": "VaR 95% (1j)",   "value": f'{metrics["var_95"]*100:.2f}%',  "color": "negative"},
-        {"label": "CVaR 95%",       "value": f'{metrics["cvar_95"]*100:.2f}%', "color": "negative"},
+        {"label": "Vol. annualisée", "value": f'{metrics["ann_vol"]*100:.2f}%', "color": ""},
+        {"label": "VaR 95% (1j)",    "value": f'{metrics["var_95"]*100:.2f}%',  "color": "negative"},
+        {"label": "CVaR 95%",        "value": f'{metrics["cvar_95"]*100:.2f}%', "color": "negative"},
     ])
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Drawdown chart
     section_title("DRAWDOWN HISTORIQUE", "📉")
-    cumul = (1 + returns).cumprod()
+    cumul    = (1 + returns).cumprod()
     roll_max = cumul.cummax()
     drawdown = (cumul - roll_max) / roll_max * 100
 
@@ -527,13 +713,13 @@ def _risk_tab(history: list, port: dict):
         yaxis=dict(title="Drawdown (%)", gridcolor="rgba(255,255,255,.04)"))
     st.plotly_chart(fig, use_container_width=True)
 
-    # Return distribution
     section_title("DISTRIBUTION DES RENDEMENTS", "📊")
     fig2 = go.Figure()
     fig2.add_trace(go.Histogram(
         x=returns * 100, nbinsx=30,
         marker_color="rgba(0,212,255,.5)",
-        hovertemplate="Rendement: %{x:.2f}%<br>Fréq: %{y}<extra></extra>", name="Rendements"))
+        hovertemplate="Rendement: %{x:.2f}%<br>Fréq: %{y}<extra></extra>",
+        name="Rendements"))
     if "var_95" in metrics:
         fig2.add_vline(x=metrics["var_95"] * 100, line_color="#ff3b6b", line_dash="dot",
                        annotation_text=f'VaR 95%: {metrics["var_95"]*100:.2f}%',
@@ -559,12 +745,8 @@ def _performance_tab(port: dict, history: list, init: float, current: float):
     </div>""", unsafe_allow_html=True)
 
     trades = port.get("trades", [])
-
-    # TWR from NAV history
-    twr = _compute_twr(history)
-
-    # MWR (approximate IRR from cash flows)
-    mwr = _compute_mwr(init, current, trades)
+    twr    = _compute_twr(history)
+    mwr    = _compute_mwr(init, current, trades)
 
     col1, col2 = st.columns(2)
     twr_col = "#00ff88" if twr >= 0 else "#ff3b6b"
@@ -596,11 +778,10 @@ def _performance_tab(port: dict, history: list, init: float, current: float):
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # TWR breakdown by sub-period
     if len(history) >= 2:
         section_title("RENDEMENTS PAR SOUS-PÉRIODE", "📅")
         df  = pd.DataFrame(history).sort_values("date")
-        df["ret"] = df["value"].pct_change() * 100
+        df["ret"]  = df["value"].pct_change() * 100
         df["date"] = pd.to_datetime(df["date"]).dt.strftime("%d/%m")
 
         fig = go.Figure(go.Bar(
@@ -614,7 +795,6 @@ def _performance_tab(port: dict, history: list, init: float, current: float):
             yaxis=dict(title="Rendement (%)", gridcolor="rgba(255,255,255,.04)"))
         st.plotly_chart(fig, use_container_width=True)
 
-    # Trade summary
     section_title("SYNTHÈSE DES TRANSACTIONS", "📋")
     if trades:
         buys  = [t for t in trades if t.get("action") == "BUY"]
@@ -622,29 +802,26 @@ def _performance_tab(port: dict, history: list, init: float, current: float):
         vol   = sum(t.get("total", 0) for t in trades)
         metric_row([
             {"label": "Total trades", "value": str(len(trades)), "color": ""},
-            {"label": "BUY",  "value": str(len(buys)),  "color": "positive"},
-            {"label": "SELL", "value": str(len(sells)), "color": "negative"},
-            {"label": "Volume ($)", "value": f"${vol:,.0f}", "color": ""},
+            {"label": "BUY",          "value": str(len(buys)),   "color": "positive"},
+            {"label": "SELL",         "value": str(len(sells)),  "color": "negative"},
+            {"label": "Volume ($)",   "value": f"${vol:,.0f}",   "color": ""},
         ])
     else:
         st.info("Aucune transaction enregistrée.")
 
 
 def _compute_twr(history: list) -> float:
-    """Compute simple TWR from NAV history."""
     if len(history) < 2:
         return 0.0
     try:
         df   = pd.DataFrame(history).sort_values("date")
         rets = df["value"].pct_change().dropna()
-        twr  = float((1 + rets).prod() - 1) * 100
-        return twr
+        return float((1 + rets).prod() - 1) * 100
     except Exception:
         return 0.0
 
 
 def _compute_mwr(init: float, current: float, trades: list) -> float:
-    """Approximate MWR as simple return (no intermediate cash flows for now)."""
     try:
         if init <= 0:
             return 0.0
