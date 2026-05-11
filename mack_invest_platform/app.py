@@ -193,9 +193,41 @@ html, body, [data-testid="stApp"] {
 ::-webkit-scrollbar-track { background: rgba(0,0,0,.2); }
 ::-webkit-scrollbar-thumb { background: rgba(0,212,255,.3); border-radius: 2px; }
 
-/* Hide streamlit default header */
+/* Hide streamlit default header + auto multi-page nav */
 #MainMenu, footer, header { visibility: hidden; }
 [data-testid="stHeader"] { display: none !important; }
+[data-testid="stSidebarNav"] { display: none !important; }
+section[data-testid="stSidebar"] ul { display: none !important; }
+
+/* Sidebar portfolio summary card */
+.port-summary-card {
+    background: rgba(0,212,255,.04);
+    border: 1px solid rgba(0,212,255,.12);
+    border-radius: 7px;
+    padding: 9px 12px;
+    margin: 5px 0;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: .68rem;
+}
+.port-summary-card .port-name {
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 700;
+    font-size: .82rem;
+    color: #e2e8f0;
+    margin-bottom: 4px;
+}
+.port-summary-card .port-stat {
+    color: #7a93b0;
+    line-height: 1.7;
+}
+.sidebar-section-label {
+    font-family: 'Rajdhani', sans-serif;
+    font-size: .62rem;
+    color: #334155;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    margin: 10px 0 4px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -312,21 +344,25 @@ state = get_or_init_state()
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
+
+    # ── Logo MAM ──────────────────────────────────────────────────────────────
     st.markdown("""
-    <div style="text-align:center;padding:16px 0 10px;">
-      <div style="font-family:Rajdhani,sans-serif;font-size:1.4rem;font-weight:700;
-                  color:#00ff88;letter-spacing:.18em;text-shadow:0 0 20px rgba(0,255,136,.4);">
+    <div style="text-align:center;padding:18px 0 12px;">
+      <div style="font-family:Rajdhani,sans-serif;font-size:2rem;font-weight:700;
+                  color:#00ff88;letter-spacing:.22em;
+                  text-shadow:0 0 28px rgba(0,255,136,.5),0 0 8px rgba(0,255,136,.2);">
         MAM
       </div>
-      <div style="font-family:Rajdhani,sans-serif;font-size:.62rem;color:#475569;
-                  letter-spacing:.22em;text-transform:uppercase;margin-top:2px;">
+      <div style="font-family:Rajdhani,sans-serif;font-size:.58rem;color:#334155;
+                  letter-spacing:.26em;text-transform:uppercase;margin-top:2px;">
         McKenson Asset Management
       </div>
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("---")
+    st.markdown('<hr style="border:none;border-top:1px solid rgba(0,212,255,.1);margin:0 0 10px;">', unsafe_allow_html=True)
 
+    # ── Sélecteurs équipe / portefeuille ──────────────────────────────────────
     teams = state.get("teams", {})
     team_names = {tid: t["name"] for tid, t in teams.items()}
 
@@ -338,63 +374,115 @@ with st.sidebar:
             key="active_team",
         )
     else:
-        st.info("Aucune équipe. Créez-en une dans Gestion des Équipes.")
+        st.caption("Aucune équipe — créez-en une via Gestion des Équipes.")
         sel_team = None
         st.session_state["active_team"] = None
 
     if sel_team:
         team_ports = teams[sel_team].get("portfolios", {})
-        # Only show portfolios created by the user (not empty placeholders)
         user_ports = {
             pid: p for pid, p in team_ports.items()
             if p.get("name")
         }
         if user_ports:
-            port_labels = {pid: f'{p.get("emoji","📁")} {p["name"]}' for pid, p in user_ports.items()}
-            sel_port = st.selectbox(
+            port_labels = {
+                pid: f'{p.get("emoji","📁")} {p["name"]}'
+                for pid, p in user_ports.items()
+            }
+            st.selectbox(
                 "📂 Portefeuille",
                 list(port_labels.keys()),
                 format_func=lambda x: port_labels[x],
                 key="active_portfolio",
             )
         else:
-            st.info("Aucun portefeuille. Créez-en un dans l'onglet Portfolios.")
+            st.caption("Aucun portefeuille — créez-en un dans Portfolios.")
             st.session_state["active_portfolio"] = None
 
-    st.markdown("---")
+    # ── Résumé rapide des portefeuilles ───────────────────────────────────────
+    if sel_team and user_ports:
+        try:
+            from utils.data import get_multi_prices as _gmp
 
-    # Navigation
+            st.markdown(
+                f'<div class="sidebar-section-label">'
+                f'📊 {len(user_ports)} portefeuille(s) actif(s)</div>',
+                unsafe_allow_html=True,
+            )
+
+            for pid, port in list(user_ports.items())[:4]:  # max 4 cards
+                holdings = port.get("holdings", {})
+                cash     = port.get("cash", 0.0)
+                name     = port.get("name", "—")
+                emoji    = port.get("emoji", "📁")
+                ptype    = port.get("portfolio_type", "Libre")
+
+                mkt_val = 0.0
+                pnl     = 0.0
+                n_pos   = len(holdings)
+
+                if holdings:
+                    prices_snap = _gmp(tuple(holdings.keys()))
+                    for tk, pos in holdings.items():
+                        qty  = pos.get("qty", 0)
+                        avg  = pos.get("avg_price", 0.0)
+                        curr, _ = prices_snap.get(tk, (avg, 0.0))
+                        mkt_val += qty * curr
+                        pnl     += qty * (curr - avg)
+
+                total_aum = cash + mkt_val
+                pnl_col   = "#00ff88" if pnl >= 0 else "#ff3b6b"
+                pnl_sign  = "+" if pnl >= 0 else ""
+                pnl_pct   = (pnl / (mkt_val - pnl) * 100) if (mkt_val - pnl) > 0 else 0.0
+
+                is_active = (pid == st.session_state.get("active_portfolio"))
+                border_col = "rgba(0,212,255,.35)" if is_active else "rgba(0,212,255,.1)"
+
+                st.markdown(
+                    f'<div class="port-summary-card" style="border-color:{border_col};">'
+                    f'<div class="port-name">{emoji} {name}'
+                    f'<span style="font-family:Rajdhani;font-size:.6rem;color:#334155;'
+                    f'margin-left:6px;letter-spacing:.1em;">{ptype}</span></div>'
+                    f'<div class="port-stat">'
+                    f'AUM <b style="color:#e2e8f0;">${total_aum:,.0f}</b> &nbsp;·&nbsp; '
+                    f'{n_pos} pos.<br>'
+                    f'P&L <b style="color:{pnl_col};">{pnl_sign}${abs(pnl):,.2f}'
+                    f'</b> <span style="color:{pnl_col};font-size:.62rem;">'
+                    f'({pnl_sign}{abs(pnl_pct):.2f}%)</span>'
+                    f'</div></div>',
+                    unsafe_allow_html=True,
+                )
+        except Exception:
+            pass
+
+    st.markdown('<hr style="border:none;border-top:1px solid rgba(0,212,255,.1);margin:10px 0 8px;">', unsafe_allow_html=True)
+
+    # ── Navigation ────────────────────────────────────────────────────────────
     pages = {
-        "🏠 Dashboard":            "dashboard",
-        "📁 Portfolios":           "portfolios",
-        "💼 Trading Desk":         "trading",
-        "📊 Analytics":            "analytics",
-        "🏆 Classement":           "ranking",
-        "🏢 Gestion des Équipes":  "teams",
-        "⚙️ Paramètres":           "settings",
+        "🏠 Dashboard":           "dashboard",
+        "📁 Portfolios":          "portfolios",
+        "💼 Trading Desk":        "trading",
+        "📊 Analytics":           "analytics",
+        "🏆 Classement":          "ranking",
+        "🏢 Gestion des Équipes": "teams",
+        "⚙️ Paramètres":          "settings",
     }
     if "page" not in st.session_state:
         st.session_state["page"] = "dashboard"
 
     for label, key in pages.items():
         active = st.session_state["page"] == key
-        btn_style = (
-            "background:rgba(0,212,255,.12);border:1px solid rgba(0,212,255,.3);color:#00d4ff;"
-            if active else
-            "background:transparent;border:1px solid transparent;color:#475569;"
-        )
-        if st.button(
-            label, key=f"nav_{key}",
-            use_container_width=True,
-        ):
+        if st.button(label, key=f"nav_{key}", use_container_width=True):
             st.session_state["page"] = key
             st.rerun()
 
-    st.markdown("---")
-    # Live clock
+    st.markdown('<hr style="border:none;border-top:1px solid rgba(0,212,255,.08);margin:8px 0 6px;">', unsafe_allow_html=True)
+
+    # Horloge
     st.markdown(
-        f'<div style="text-align:center;font-family:Share Tech Mono;font-size:.65rem;'
-        f'color:#334155;">{datetime.now().strftime("%d/%m/%Y  %H:%M:%S")}</div>',
+        f'<div style="text-align:center;font-family:Share Tech Mono;font-size:.62rem;'
+        f'color:#283347;padding-bottom:6px;">'
+        f'{datetime.now().strftime("%d/%m/%Y  %H:%M")}</div>',
         unsafe_allow_html=True,
     )
 
