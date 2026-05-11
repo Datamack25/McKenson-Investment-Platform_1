@@ -1,11 +1,8 @@
-# pages/trading.py  —  MAM  v3.2  FIXED
+# pages/trading.py  —  MAM  v4.0
 """
 Trading Desk: Spot trading + European Options (Black-Scholes + full Greeks).
-
-FIX v3.2:
-  - Options: added proper "Valider l'ordre" submit button with confirmation
-  - fig.add_fill → fig.add_trace (Plotly API fix)
-  - Timezone-aware datetime fix in history charts
++ Sélection de typologie de portefeuille avec validation des actifs selon les règles.
++ P&L réel basé sur yfinance (prix moyen d'entrée vs prix actuel).
 """
 from __future__ import annotations
 import math
@@ -30,12 +27,173 @@ _P = dict(
     margin=dict(l=8, r=8, t=28, b=8),
 )
 
+# ── Règles par typologie ───────────────────────────────────────────────────────
+PORTFOLIO_TYPES = {
+    "Libre": {
+        "desc": "Aucune contrainte de stratégie. Garde-fous techniques minimaux uniquement.",
+        "color": "#94a3b8",
+        "emoji": "🔓",
+        "allowed_categories": None,  # tout autorisé
+        "forbidden_categories": [],
+        "max_single_weight": 1.0,
+        "min_yield": None,
+        "rules_text": "Aucune contrainte — validation poids uniquement.",
+    },
+    "Growth": {
+        "desc": "Actions de croissance à fort CA / bénéfice. Pas d'actifs défensifs dominants.",
+        "color": "#00ff88",
+        "emoji": "🚀",
+        "allowed_categories": ["Equities", "ETF", "Equity"],
+        "forbidden_categories": ["Bonds", "Commodities", "Crypto"],
+        "max_single_weight": 0.30,
+        "min_yield": None,
+        "rules_text": "Univers : actions croissance. Interdit : obligations, matières premières.",
+    },
+    "Value": {
+        "desc": "Actions sous-évaluées. Faible P/E, faible P/B, marge de sécurité.",
+        "color": "#ffd700",
+        "emoji": "💎",
+        "allowed_categories": ["Equities", "ETF", "Equity"],
+        "forbidden_categories": ["Crypto", "Commodities"],
+        "max_single_weight": 0.25,
+        "min_yield": None,
+        "rules_text": "Univers : actions décotées. Interdit : crypto, spéculatif.",
+    },
+    "Momentum": {
+        "desc": "Actifs en tendance positive récente. Rotation régulière.",
+        "color": "#ff8c00",
+        "emoji": "⚡",
+        "allowed_categories": ["Equities", "ETF", "Equity", "Crypto"],
+        "forbidden_categories": ["Bonds"],
+        "max_single_weight": 0.20,
+        "min_yield": None,
+        "rules_text": "Univers : actifs en tendance. Interdit : obligations, tendances baissières.",
+    },
+    "Income": {
+        "desc": "Actions à dividendes, obligations, actifs à coupon. Rendement régulier.",
+        "color": "#00d4ff",
+        "emoji": "💰",
+        "allowed_categories": ["Equities", "ETF", "Bonds", "Equity"],
+        "forbidden_categories": ["Crypto"],
+        "max_single_weight": 0.20,
+        "min_yield": 0.02,
+        "rules_text": "Univers : dividendes + obligations. Interdit : crypto spéculatif.",
+    },
+    "Global Macro": {
+        "desc": "Multi-actifs selon taux, inflation, devises, matières premières.",
+        "color": "#7c3aed",
+        "emoji": "🌍",
+        "allowed_categories": None,
+        "forbidden_categories": [],
+        "max_single_weight": 0.25,
+        "min_yield": None,
+        "rules_text": "Multi-actifs. Interdit : concentration sur une seule classe.",
+    },
+    "Hedging": {
+        "desc": "Actifs défensifs, instruments de couverture. Beta faible.",
+        "color": "#475569",
+        "emoji": "🛡️",
+        "allowed_categories": ["Bonds", "ETF", "Commodities", "Equities", "Equity"],
+        "forbidden_categories": ["Crypto"],
+        "max_single_weight": 0.20,
+        "min_yield": None,
+        "rules_text": "Univers : défensif + couverture. Interdit : crypto, exposition agressive.",
+    },
+    "Balanced 60/40": {
+        "desc": "60% actions / 40% obligations. Rééquilibrage périodique.",
+        "color": "#00ff88",
+        "emoji": "⚖️",
+        "allowed_categories": ["Equities", "Bonds", "ETF", "Equity"],
+        "forbidden_categories": ["Crypto", "Commodities"],
+        "max_single_weight": 0.20,
+        "min_yield": None,
+        "rules_text": "60% actions / 40% obligations. Interdit : crypto, matières premières.",
+    },
+    "Commodity": {
+        "desc": "Matières premières, ETF, futures liés aux commodities.",
+        "color": "#ff8c00",
+        "emoji": "🏭",
+        "allowed_categories": ["Commodities", "ETF"],
+        "forbidden_categories": ["Crypto", "Equities", "Bonds", "Equity"],
+        "max_single_weight": 0.30,
+        "min_yield": None,
+        "rules_text": "Univers : commodities. Interdit : actions, crypto, obligations.",
+    },
+    "Crypto Alpha": {
+        "desc": "Crypto-actifs uniquement. Stablecoins autorisés pour cash.",
+        "color": "#ff3b6b",
+        "emoji": "₿",
+        "allowed_categories": ["Crypto"],
+        "forbidden_categories": ["Equities", "Bonds", "Commodities", "Equity", "ETF"],
+        "max_single_weight": 0.40,
+        "min_yield": None,
+        "rules_text": "Univers : crypto uniquement. Interdit : tout actif non-crypto.",
+    },
+    "Arbitrage": {
+        "desc": "Inefficiences de prix, exposition quasi delta-neutre.",
+        "color": "#94a3b8",
+        "emoji": "↔️",
+        "allowed_categories": None,
+        "forbidden_categories": [],
+        "max_single_weight": 0.15,
+        "min_yield": None,
+        "rules_text": "Capture du spread. Interdit : positions purement directionnelles.",
+    },
+}
+
+# Mapping catégories yfinance → catégories internes
+CATEGORY_MAP = {
+    "Technology": "Equities",
+    "Financial Services": "Equities",
+    "Healthcare": "Equities",
+    "Consumer Cyclical": "Equities",
+    "Consumer Defensive": "Equities",
+    "Industrials": "Equities",
+    "Energy": "Equities",
+    "Utilities": "Equities",
+    "Real Estate": "Equities",
+    "Communication Services": "Equities",
+    "Basic Materials": "Equities",
+    "ETF": "ETF",
+    "Bond": "Bonds",
+    "Bonds": "Bonds",
+    "Crypto": "Crypto",
+    "Cryptocurrency": "Crypto",
+    "Commodities": "Commodities",
+    "Commodity": "Commodities",
+    "Equity": "Equities",
+    "Equities": "Equities",
+}
+
+
+def validate_asset_for_type(asset_row: pd.Series, port_type: str) -> tuple[bool, str]:
+    """Retourne (is_valid, reason)."""
+    if port_type == "Libre":
+        return True, "✅ Autorisé (mode Libre)"
+
+    rules = PORTFOLIO_TYPES[port_type]
+    cat_raw = str(asset_row.get("category", "Equities"))
+    cat = CATEGORY_MAP.get(cat_raw, cat_raw)
+
+    allowed   = rules["allowed_categories"]
+    forbidden = rules["forbidden_categories"]
+
+    if forbidden and cat in forbidden:
+        return False, f"❌ Catégorie '{cat}' interdite pour {port_type}"
+    if allowed is not None and cat not in allowed:
+        return False, f"❌ Catégorie '{cat}' non autorisée pour {port_type} (autorisées: {', '.join(allowed)})"
+    return True, f"✅ Autorisé — catégorie '{cat}' conforme à {port_type}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MAIN RENDER
+# ══════════════════════════════════════════════════════════════════════════════
 
 def render():
-    state      = get_or_init_state()
-    team_id    = st.session_state.get("active_team")
-    port_id    = st.session_state.get("active_portfolio")
-    teams      = state.get("teams", {})
+    state   = get_or_init_state()
+    team_id = st.session_state.get("active_team")
+    port_id = st.session_state.get("active_portfolio")
+    teams   = state.get("teams", {})
 
     st.markdown(
         '<h1 style="font-family:Rajdhani,sans-serif;font-size:2rem;letter-spacing:.12em;'
@@ -56,16 +214,47 @@ def render():
         st.error(f"Portefeuille {port_id} introuvable.")
         return
 
+    # ── Sélection de la typologie ──────────────────────────────────────────────
+    current_type = port.get("portfolio_type", "Libre")
+    type_list    = list(PORTFOLIO_TYPES.keys())
+
+    col_type, col_info = st.columns([1, 2])
+    with col_type:
+        new_type = st.selectbox(
+            "🎯 Stratégie du portefeuille",
+            type_list,
+            index=type_list.index(current_type) if current_type in type_list else 0,
+            key="port_type_select",
+        )
+        if new_type != current_type:
+            port["portfolio_type"] = new_type
+            persist()
+            st.rerun()
+
+    with col_info:
+        rules     = PORTFOLIO_TYPES[new_type]
+        rule_col  = rules["color"]
+        st.markdown(
+            f'<div style="background:rgba(0,0,0,.25);border:1px solid {rule_col}33;'
+            f'border-left:3px solid {rule_col};border-radius:6px;padding:10px 14px;'
+            f'font-family:Share Tech Mono;font-size:.74rem;color:#94a3b8;margin-top:4px;">'
+            f'<span style="color:{rule_col};font-family:Rajdhani;font-weight:700;'
+            f'font-size:.9rem;">{rules["emoji"]} {new_type}</span><br>'
+            f'<span style="color:#7a93b0;">{rules["rules_text"]}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
     assets_df = load_assets()
 
     tab_spot, tab_options, tab_positions = st.tabs([
         "📈 SPOT TRADING",
         "⚙️ OPTIONS (BLACK-SCHOLES)",
-        "📋 TOUTES LES POSITIONS",
+        "📋 MES POSITIONS",
     ])
 
     with tab_spot:
-        _spot_desk(port, state, team_id, port_id, assets_df)
+        _spot_desk(port, state, team_id, port_id, assets_df, new_type)
 
     with tab_options:
         _options_desk(port, state, team_id, port_id, assets_df)
@@ -75,16 +264,15 @@ def render():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SPOT TRADING
+#  SPOT TRADING  (avec validation de type)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _spot_desk(port, state, team_id, port_id, assets_df):
+def _spot_desk(port, state, team_id, port_id, assets_df, port_type="Libre"):
     section_title("PASSER UN ORDRE SPOT", "📈")
 
     col_l, col_r = st.columns([1, 1])
 
     with col_l:
-        # Asset selector
         ticker_opts = {
             f'{row["ticker"]} — {row["name"]}': row["ticker"]
             for _, row in assets_df.iterrows()
@@ -92,11 +280,25 @@ def _spot_desk(port, state, team_id, port_id, assets_df):
         sel    = st.selectbox("Actif", list(ticker_opts.keys()), key="spot_asset")
         ticker = ticker_opts[sel]
 
+        # Find asset row
+        asset_row = assets_df[assets_df["ticker"] == ticker]
+        asset_row_s = asset_row.iloc[0] if not asset_row.empty else pd.Series({"category": "Equities"})
+
+        # ── Validation de type ─────────────────────────────────────────────────
+        is_valid, valid_msg = validate_asset_for_type(asset_row_s, port_type)
+        valid_color = "#00ff88" if is_valid else "#ff3b6b"
+        st.markdown(
+            f'<div style="background:rgba(0,0,0,.2);border:1px solid {valid_color}33;'
+            f'border-left:3px solid {valid_color};border-radius:4px;padding:7px 12px;'
+            f'font-family:Share Tech Mono;font-size:.72rem;color:{valid_color};margin:6px 0;">'
+            f'{valid_msg}</div>',
+            unsafe_allow_html=True,
+        )
+
         action = st.radio("Direction", ["🟢 ACHETER", "🔴 VENDRE"],
                           horizontal=True, key="spot_dir")
         is_buy = "ACHETER" in action
 
-        # Live price
         price, pct = get_price_change(ticker)
         p_col = "#00ff88" if pct >= 0 else "#ff3b6b"
         p_arr = "▲" if pct >= 0 else "▼"
@@ -115,7 +317,6 @@ def _spot_desk(port, state, team_id, port_id, assets_df):
             unsafe_allow_html=True,
         )
 
-        # Order size
         order_type = st.radio("Type", ["Par quantité", "Par montant ($)"],
                                horizontal=True, key="spot_type")
         if order_type == "Par quantité":
@@ -129,10 +330,8 @@ def _spot_desk(port, state, team_id, port_id, assets_df):
             qty         = amount / price if price > 0 else 0
             total_order = amount
 
-        # Mini chart
         hist = get_history(ticker, "1mo")
         if not hist.empty and "Close" in hist.columns:
-            # FIX: strip timezone
             if hist.index.tz is not None:
                 hist.index = hist.index.tz_localize(None)
             fig = go.Figure(go.Scatter(
@@ -148,7 +347,6 @@ def _spot_desk(port, state, team_id, port_id, assets_df):
             st.plotly_chart(fig, use_container_width=True)
 
     with col_r:
-        # Portfolio context
         cash     = port.get("cash", 0.0)
         holdings = port.get("holdings", {})
         pos_qty  = holdings.get(ticker, {}).get("qty", 0)
@@ -168,8 +366,9 @@ def _spot_desk(port, state, team_id, port_id, assets_df):
             unsafe_allow_html=True,
         )
 
-        # Validation
         errors = []
+        if not is_valid and is_buy:
+            errors.append(f"❌ Actif incompatible avec la stratégie {port_type}")
         if is_buy and total_order > cash + 0.01:
             errors.append(f"❌ Fonds insuffisants (cash: ${cash:,.0f}, ordre: ${total_order:,.0f})")
         if not is_buy and qty > pos_qty + 1e-6:
@@ -185,7 +384,6 @@ def _spot_desk(port, state, team_id, port_id, assets_df):
                 unsafe_allow_html=True,
             )
 
-        # Summary
         btn_col = "#00ff88" if is_buy else "#ff3b6b"
         btn_txt = f'{"✅ ACHETER" if is_buy else "🔴 VENDRE"} {qty:,.4f} × {ticker}'
 
@@ -217,15 +415,14 @@ def _spot_desk(port, state, team_id, port_id, assets_df):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  OPTIONS DESK  (Black-Scholes + full Greeks + validated submit)
+#  OPTIONS DESK
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _options_desk(port, state, team_id, port_id, assets_df):
     section_title("OPTIONS EUROPÉENNES — BLACK-SCHOLES", "⚙️")
 
-    # Filter to optionable assets (equities + ETFs)
     if "category" in assets_df.columns:
-        opt_mask  = assets_df["category"].isin(["Equities", "ETF", "Crypto", "Equity"])
+        opt_mask   = assets_df["category"].isin(["Equities", "ETF", "Crypto", "Equity"])
         opt_assets = assets_df[opt_mask]
     else:
         opt_assets = assets_df
@@ -250,23 +447,21 @@ def _options_desk(port, state, team_id, port_id, assets_df):
             unsafe_allow_html=True,
         )
 
-        opt_type   = st.radio("Type", ["call", "put"], horizontal=True, key="opt_type")
-        K          = st.number_input("Strike (K)", 0.01, 1e6,
-                                     max(round(spot, 2), 0.01), key="opt_K")
-        T_days     = st.slider("Maturité (jours)", 1, 730, 30, key="opt_T")
-        T          = T_days / 365.0
-        r_rate     = st.slider("Taux sans risque (%)", 0.0, 10.0, 4.25, 0.1, key="opt_r") / 100
-        sigma      = st.slider("Volatilité implicite (%)", 1.0, 150.0, 20.0, 0.5, key="opt_sig") / 100
+        opt_type    = st.radio("Type", ["call", "put"], horizontal=True, key="opt_type")
+        K           = st.number_input("Strike (K)", 0.01, 1e6,
+                                      max(round(spot, 2), 0.01), key="opt_K")
+        T_days      = st.slider("Maturité (jours)", 1, 730, 30, key="opt_T")
+        T           = T_days / 365.0
+        r_rate      = st.slider("Taux sans risque (%)", 0.0, 10.0, 4.25, 0.1, key="opt_r") / 100
+        sigma       = st.slider("Volatilité implicite (%)", 1.0, 150.0, 20.0, 0.5, key="opt_sig") / 100
         n_contracts = st.number_input("Nombre de contrats (×100 actions)",
                                       min_value=1, value=1, step=1, key="opt_n")
 
     with col_r:
-        # ── Black-Scholes computation ──────────────────────────────────────────
-        premium = bs_price(spot, K, T, r_rate, sigma, opt_type)
-        greeks  = bs_greeks(spot, K, T, r_rate, sigma, opt_type)
+        premium       = bs_price(spot, K, T, r_rate, sigma, opt_type)
+        greeks        = bs_greeks(spot, K, T, r_rate, sigma, opt_type)
         total_premium = premium * n_contracts * 100
 
-        # Moneyness
         ratio = spot / K if K > 0 else 1.0
         if opt_type == "call":
             if ratio > 1.02:   mon, mon_col = "IN THE MONEY",  "#00ff88"
@@ -297,18 +492,20 @@ def _options_desk(port, state, team_id, port_id, assets_df):
             unsafe_allow_html=True,
         )
 
-        # Greeks cards
         greek_data = [
-            ("Δ DELTA",  f'{greeks["delta"]:+.4f}', "Sensibilité au prix spot",  "#00d4ff"),
-            ("Γ GAMMA",  f'{greeks["gamma"]:.6f}',  "Convexité du delta",        "#00ff88"),
-            ("Θ THETA",  f'{greeks["theta"]:+.4f}$/j', "Décroissance temporelle", "#ff3b6b"),
-            ("ν VEGA",   f'{greeks["vega"]:+.4f}$/1%', "Sensibilité à la vol",   "#ff8c00"),
-            ("ρ RHO",    f'{greeks["rho"]:+.4f}$/1%',  "Sensibilité aux taux",   "#7c3aed"),
+            ("Δ DELTA",  f'{greeks["delta"]:+.4f}',      "Sensibilité au prix spot",  "#00d4ff"),
+            ("Γ GAMMA",  f'{greeks["gamma"]:.6f}',       "Convexité du delta",        "#00ff88"),
+            ("Θ THETA",  f'{greeks["theta"]:+.4f}$/j',   "Décroissance temporelle",   "#ff3b6b"),
+            ("ν VEGA",   f'{greeks["vega"]:+.4f}$/1%',   "Sensibilité à la vol",      "#ff8c00"),
+            ("ρ RHO",    f'{greeks["rho"]:+.4f}$/1%',    "Sensibilité aux taux",      "#7c3aed"),
         ]
         g_cols = st.columns(2)
         for i, (gname, gval, gdesc, gcol) in enumerate(greek_data):
-            val_float = float(gval.replace("+","").replace("$","").replace("/j","").replace("/1%",""))
-            sign_col  = "#00ff88" if val_float >= 0 else "#ff3b6b"
+            try:
+                val_float = float(gval.replace("+","").replace("$","").replace("/j","").replace("/1%",""))
+            except ValueError:
+                val_float = 0.0
+            sign_col = "#00ff88" if val_float >= 0 else "#ff3b6b"
             with g_cols[i % 2]:
                 st.markdown(
                     f'<div style="background:rgba(0,0,0,.2);border:1px solid rgba(255,255,255,.06);'
@@ -323,7 +520,7 @@ def _options_desk(port, state, team_id, port_id, assets_df):
                     unsafe_allow_html=True,
                 )
 
-    # ── Implied Vol Calculator ─────────────────────────────────────────────────
+    # ── Implied Vol + Payoff ───────────────────────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
     col_iv, col_payoff = st.columns(2)
 
@@ -366,7 +563,6 @@ def _options_desk(port, state, team_id, port_id, assets_df):
         pnl_neg = np.where(pnl <  0, pnl, 0)
 
         fig2 = go.Figure()
-        # FIX: use add_trace instead of add_fill (wrong Plotly API)
         fig2.add_trace(go.Scatter(
             x=spots, y=pnl_pos, fill="tozeroy",
             fillcolor="rgba(0,255,136,.12)",
@@ -392,7 +588,6 @@ def _options_desk(port, state, team_id, port_id, assets_df):
         fig2.add_vline(x=K, line_dash="dash", line_color="rgba(255,255,255,.3)",
                        annotation_text=f"K=${K:.1f}",
                        annotation_font_color="rgba(255,255,255,.5)")
-        # Breakeven
         sign_changes = np.where(np.diff(np.sign(pnl)))[0]
         for idx in sign_changes:
             be = (spots[idx] + spots[idx + 1]) / 2
@@ -405,22 +600,18 @@ def _options_desk(port, state, team_id, port_id, assets_df):
             yaxis=dict(title="P&L ($)", gridcolor="rgba(255,255,255,.04)"))
         st.plotly_chart(fig2, use_container_width=True)
 
-    # ══════════════════════════════════════════════════════════════════════════
-    #  OPTIONS ORDER  — FIX: proper submit button with validation
-    # ══════════════════════════════════════════════════════════════════════════
+    # ── Options order ──────────────────────────────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
     section_title("PASSER UN ORDRE SUR OPTION", "✅")
 
-    opt_action = st.radio(
+    opt_action  = st.radio(
         "Sens de l'ordre",
         ["🟢 ACHETER (Long)", "🔴 VENDRE (Short / Write)"],
         horizontal=True, key="opt_action",
     )
     is_buy_opt  = "ACHETER" in opt_action
-    cost_or_rec = total_premium  # positive = cost if buying, revenue if selling
     cash        = port.get("cash", 0.0)
 
-    # Option position summary
     col_sum1, col_sum2 = st.columns(2)
     with col_sum1:
         st.markdown(
@@ -445,7 +636,6 @@ def _options_desk(port, state, team_id, port_id, assets_df):
         )
 
     with col_sum2:
-        # Risk/reward summary
         if opt_type == "call" and is_buy_opt:
             max_loss = total_premium
             max_gain = "Illimité"
@@ -458,7 +648,7 @@ def _options_desk(port, state, team_id, port_id, assets_df):
             max_loss = "Illimité"
             max_gain = total_premium
             be_price = K + premium
-        else:  # put + short
+        else:
             max_loss = f"${(K - premium) * n_contracts * 100:,.0f}"
             max_gain = total_premium
             be_price = K - premium
@@ -479,12 +669,10 @@ def _options_desk(port, state, team_id, port_id, assets_df):
             unsafe_allow_html=True,
         )
 
-    # Validation errors
     opt_errors = []
     if is_buy_opt and total_premium > cash + 0.01:
         opt_errors.append(
-            f"❌ Fonds insuffisants pour payer la prime "
-            f"(besoin: ${total_premium:,.2f}, cash: ${cash:,.2f})"
+            f"❌ Fonds insuffisants (besoin: ${total_premium:,.2f}, cash: ${cash:,.2f})"
         )
     if n_contracts <= 0:
         opt_errors.append("❌ Nombre de contrats invalide")
@@ -499,7 +687,6 @@ def _options_desk(port, state, team_id, port_id, assets_df):
             unsafe_allow_html=True,
         )
 
-    # ── THE FIX: actual submit button for options ──────────────────────────────
     btn_label = (
         f'{"✅ ACHETER" if is_buy_opt else "🔴 VENDRE"} '
         f'{n_contracts} contrat(s) {opt_type.upper()} '
@@ -507,29 +694,25 @@ def _options_desk(port, state, team_id, port_id, assets_df):
     )
 
     if st.button(btn_label, disabled=len(opt_errors) > 0, key="opt_submit", type="primary"):
-        # Record option position
         opt_positions = port.setdefault("options", [])
         opt_positions.append({
-            "date":        datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "ticker":      ticker,
-            "type":        opt_type,
-            "action":      "BUY" if is_buy_opt else "SELL",
-            "strike":      round(K, 4),
+            "date":          datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "ticker":        ticker,
+            "type":          opt_type,
+            "action":        "BUY" if is_buy_opt else "SELL",
+            "strike":        round(K, 4),
             "maturity_days": T_days,
-            "sigma":       round(sigma * 100, 2),
-            "n_contracts": n_contracts,
-            "premium":     round(premium, 6),
+            "sigma":         round(sigma * 100, 2),
+            "n_contracts":   n_contracts,
+            "premium":       round(premium, 6),
             "total_premium": round(total_premium, 2),
             "spot_at_entry": round(spot, 4),
         })
-
-        # Deduct/add premium from/to cash
         if is_buy_opt:
             port["cash"] = port.get("cash", 0) - total_premium
         else:
             port["cash"] = port.get("cash", 0) + total_premium
 
-        # Record as trade
         port.setdefault("trades", []).append({
             "date":   datetime.now().strftime("%Y-%m-%d %H:%M"),
             "ticker": f"{ticker} {opt_type.upper()} K={K:.2f}",
@@ -538,17 +721,14 @@ def _options_desk(port, state, team_id, port_id, assets_df):
             "price":  round(premium, 6),
             "total":  round(total_premium, 2),
         })
-
         persist()
         action_str = "Achat" if is_buy_opt else "Vente"
         st.success(
             f"✅ {action_str} option exécuté : {n_contracts} contrat(s) "
-            f"{opt_type.upper()} K=${K:.2f} sur {ticker} | "
-            f"Prime : ${total_premium:,.2f}"
+            f"{opt_type.upper()} K=${K:.2f} sur {ticker} | Prime : ${total_premium:,.2f}"
         )
         st.rerun()
 
-    # ── Existing option positions ──────────────────────────────────────────────
     opt_pos = port.get("options", [])
     if opt_pos:
         st.markdown("<br>", unsafe_allow_html=True)
@@ -558,11 +738,11 @@ def _options_desk(port, state, team_id, port_id, assets_df):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ALL POSITIONS (cross-portfolio view)
+#  MES POSITIONS — P&L RÉEL yfinance
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _all_positions(teams, assets_df):
-    section_title("TOUTES LES POSITIONS — PORTEFEUILLE ACTIF", "📋")
+    section_title("MES POSITIONS — P&L EN TEMPS RÉEL", "📋")
 
     team_id = st.session_state.get("active_team")
     port_id = st.session_state.get("active_portfolio")
@@ -584,7 +764,7 @@ def _all_positions(teams, assets_df):
     tickers = tuple(holdings.keys())
     prices  = get_multi_prices(tickers)
 
-    hdr = ["Ticker", "Quantité", "Px moy.", "Px actuel", "Var. 1j",
+    hdr = ["Ticker", "Qté", "Px entrée moy.", "Px actuel", "Var. 1j",
            "Valeur marché", "P&L ($)", "P&L (%)"]
     th  = "".join(
         f'<th style="font-family:Rajdhani;font-size:.66rem;color:#00d4ff;'
@@ -592,27 +772,45 @@ def _all_positions(teams, assets_df):
         f'background:rgba(0,212,255,.06);border-bottom:1px solid rgba(0,212,255,.15);">'
         f'{c}</th>' for c in hdr)
 
-    tbody = ""
+    tbody     = ""
     total_val = 0.0
     total_pnl = 0.0
 
     for ticker, pos in holdings.items():
         qty = pos.get("qty", 0)
         avg = pos.get("avg_price", 0.0)
+
+        # ── P&L RÉEL : prix actuel vs prix moyen d'entrée ──────────────────
         curr, pct_d = prices.get(ticker, (avg, 0.0))
+
+        # Si le prix actuel est identique au prix d'entrée (donnée indisponible),
+        # on marque explicitement comme N/D pour éviter 0% ou 100% trompeurs
+        price_available = curr != avg or pct_d != 0.0
+
         mkt  = qty * curr
         cost = qty * avg
-        pnl  = mkt - cost
-        ppct = pnl / cost * 100 if cost else 0.0
+        pnl  = mkt - cost   # gain/perte réel en $
+
+        # % P&L basé sur le coût d'entrée
+        if cost > 0 and price_available:
+            ppct = pnl / cost * 100
+        elif cost == 0:
+            ppct = 0.0
+        else:
+            ppct = 0.0
 
         total_val += mkt
         total_pnl += pnl
 
-        pc   = "pnl-pos" if pnl > 0 else ("pnl-neg" if pnl < 0 else "pnl-zero")
-        vc   = "pnl-pos" if pct_d > 0 else ("pnl-neg" if pct_d < 0 else "pnl-zero")
-        sg   = "+" if pnl > 0 else ""
-        ar   = "▲" if pnl > 0 else ("▼" if pnl < 0 else "▬")
-        vr   = "▲" if pct_d > 0 else ("▼" if pct_d < 0 else "▬")
+        # Couleurs
+        pnl_c = "#00ff88" if pnl > 0 else ("#ff3b6b" if pnl < 0 else "#94a3b8")
+        day_c = "#00ff88" if pct_d > 0 else ("#ff3b6b" if pct_d < 0 else "#94a3b8")
+        sg    = "+" if pnl > 0 else ""
+        ar    = "▲" if pnl > 0 else ("▼" if pnl < 0 else "▬")
+        vr    = "▲" if pct_d > 0 else ("▼" if pct_d < 0 else "▬")
+
+        pnl_str  = f'{sg}${abs(pnl):,.2f}'
+        ppct_str = f'{ar} {abs(ppct):.2f}%'
 
         tbody += (
             f'<tr style="border-bottom:1px solid rgba(255,255,255,.03);">'
@@ -620,23 +818,23 @@ def _all_positions(teams, assets_df):
             f'<td style="padding:7px 9px;">{qty:,.4f}</td>'
             f'<td style="padding:7px 9px;color:#7a93b0;">${avg:,.4f}</td>'
             f'<td style="padding:7px 9px;">${curr:,.4f}</td>'
-            f'<td style="padding:7px 9px;" class="{vc}">{vr} {abs(pct_d):.2f}%</td>'
-            f'<td style="padding:7px 9px;">${mkt:,.0f}</td>'
-            f'<td style="padding:7px 9px;" class="{pc}">{sg}${abs(pnl):,.2f}</td>'
-            f'<td style="padding:7px 9px;" class="{pc}">{ar} {abs(ppct):.2f}%</td>'
+            f'<td style="padding:7px 9px;color:{day_c};">{vr} {abs(pct_d):.2f}%</td>'
+            f'<td style="padding:7px 9px;">${mkt:,.2f}</td>'
+            f'<td style="padding:7px 9px;color:{pnl_c};font-weight:bold;">{pnl_str}</td>'
+            f'<td style="padding:7px 9px;color:{pnl_c};">{ppct_str}</td>'
             f'</tr>'
         )
 
-    # Totals footer
-    tc   = "pnl-pos" if total_pnl > 0 else ("pnl-neg" if total_pnl < 0 else "pnl-zero")
-    tsg  = "+" if total_pnl > 0 else ""
+    # Footer total
+    tc  = "#00ff88" if total_pnl > 0 else ("#ff3b6b" if total_pnl < 0 else "#94a3b8")
+    tsg = "+" if total_pnl > 0 else ""
     tbody += (
         f'<tr style="background:rgba(0,212,255,.05);border-top:1px solid rgba(0,212,255,.2);">'
         f'<td colspan="5" style="padding:7px 9px;font-family:Rajdhani;font-size:.78rem;'
         f'color:#7a93b0;letter-spacing:.1em;text-transform:uppercase;">'
-        f'TOTAL ({len(holdings)} positions)</td>'
-        f'<td style="padding:7px 9px;color:#e2e8f0;font-weight:bold;">${total_val:,.0f}</td>'
-        f'<td style="padding:7px 9px;" class="{tc}">{tsg}${abs(total_pnl):,.2f}</td>'
+        f'TOTAL ({len(holdings)} position(s))</td>'
+        f'<td style="padding:7px 9px;color:#e2e8f0;font-weight:bold;">${total_val:,.2f}</td>'
+        f'<td style="padding:7px 9px;color:{tc};font-weight:bold;">{tsg}${abs(total_pnl):,.2f}</td>'
         f'<td></td>'
         f'</tr>'
     )
@@ -649,7 +847,7 @@ def _all_positions(teams, assets_df):
         unsafe_allow_html=True,
     )
 
-    # Recent trades
+    # Historique
     section_title("HISTORIQUE DES TRANSACTIONS", "🔄")
     trades = port.get("trades", [])
     if trades:
