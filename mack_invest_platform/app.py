@@ -533,12 +533,13 @@ with st.sidebar:
     # ── Navigation ────────────────────────────────────────────────────────────
     pages = {
         "🏠 Dashboard":           "dashboard",
-        "📁 Portfolios":          "portfolios",
         "💼 Trading Desk":        "trading",
-        "📊 Analytics":           "analytics",
-        "🏆 Classement":          "ranking",
-        "🏢 Gestion des Équipes": "teams",
-        "⚙️ Paramètres":          "settings",
+        "📊 Technique":           "technical",
+        "📈 Optimizer":           "optimizer",
+        "🏆 Classement":          "leaderboard",
+        "🎓 Éducation":           "education",
+        "📅 Événements":          "events",
+        "🏢 Administration":      "admin",
     }
     if "page" not in st.session_state:
         st.session_state["page"] = "dashboard"
@@ -562,24 +563,23 @@ with st.sidebar:
 # ── Page routing ───────────────────────────────────────────────────────────────
 page = st.session_state.get("page", "dashboard")
 
-if page == "dashboard":
-    from pages import dashboard
-    dashboard.render()
-elif page == "portfolios":
-    from pages import portfolios
-    portfolios.render()
-elif page == "trading":
-    from pages import trading
-    trading.render()
-elif page == "analytics":
-    from pages import analytics
-    analytics.render()
-elif page == "ranking":
-    from pages import ranking
-    ranking.render()
-elif page == "teams":
-    from pages import teams as teams_page
-    teams_page.render()
-elif page == "settings":
-    from pages import settings
-    settings.render()
+try:
+    if page == "dashboard":
+        from pages import dashboard; dashboard.render()
+    elif page == "trading":
+        from pages import trading; trading.render()
+    elif page == "technical":
+        from pages import technical; technical.render()
+    elif page == "optimizer":
+        from pages import optimizer; optimizer.render()
+    elif page == "leaderboard":
+        from pages import leaderboard; leaderboard.render()
+    elif page == "education":
+        from pages import education; education.render()
+    elif page == "events":
+        from pages import events; events.render()
+    elif page == "admin":
+        from pages import admin; admin.render()
+except ImportError as e:
+    st.warning(f"Page en cours de construction : `{page}`")
+    st.caption(str(e))
