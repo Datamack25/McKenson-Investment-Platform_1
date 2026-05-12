@@ -1,13 +1,13 @@
-# utils/data.py  —  McKenson Asset Management (MAM)  v3.1  FIXED
+# utils/data.py  —  McKenson Asset Management (MAM)  v4.0
 """
 Real-time market data via yfinance (15-min delayed).
 Game state management, news scraping, portfolio calculations.
 
-FIX v3.1:
-  - Added compute_portfolio_metrics (alias for compute_risk_metrics)
-  - Added get_strip_data (ticker strip helper)
-  - Added load_events (market events CSV loader)
-  - Added record_trade helper
+v4.0 changes:
+  - get_multi_prices: uses fast_info.last_price + previous_close (per ticker)
+    for accurate 1D change; falls back to history() if fast_info fails
+  - ttl réduit à 60s pour que le P&L se rafraîchisse plus souvent
+  - get_price / get_price_change alignés sur même logique
 """
 from __future__ import annotations
 import json
@@ -100,7 +100,7 @@ _FB_PCT: dict[str, float] = {
 #  PRICE FETCHING  (yfinance — real prices, ~15-min delayed)
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=180, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def get_price(ticker: str) -> float:
     """Single ticker — returns latest real price from yfinance."""
     if not _YF:
@@ -112,12 +112,22 @@ def get_price(ticker: str) -> float:
             raise ValueError("bad price")
         return p
     except Exception:
+        try:
+            hist = yf.Ticker(ticker).history(period="2d")
+            if not hist.empty:
+                return float(hist["Close"].iloc[-1])
+        except Exception:
+            pass
         return _FB.get(ticker, 100.0)
 
 
-@st.cache_data(ttl=180, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def get_price_change(ticker: str) -> tuple[float, float]:
-    """Returns (price, pct_change_vs_prev_close) — real data."""
+    """
+    Returns (price, pct_change_vs_prev_close).
+    Uses fast_info.last_price + fast_info.previous_close.
+    Falls back to history() if fast_info unavailable.
+    """
     if not _YF:
         return _FB.get(ticker, 100.0), _FB_PCT.get(ticker, 0.0)
     try:
@@ -125,53 +135,74 @@ def get_price_change(ticker: str) -> tuple[float, float]:
         price = float(info.last_price)
         prev  = float(info.previous_close)
         if math.isnan(price) or price <= 0:
-            raise ValueError
+            raise ValueError("bad price")
         pct = ((price - prev) / prev * 100) if prev > 0 else 0.0
         return price, pct
     except Exception:
-        return _FB.get(ticker, 100.0), _FB_PCT.get(ticker, 0.0)
+        pass
+    # Fallback: history
+    try:
+        hist = yf.Ticker(ticker).history(period="5d")
+        if len(hist) >= 2:
+            price = float(hist["Close"].iloc[-1])
+            prev  = float(hist["Close"].iloc[-2])
+            pct   = ((price - prev) / prev * 100) if prev > 0 else 0.0
+            return price, pct
+        elif len(hist) == 1:
+            return float(hist["Close"].iloc[-1]), 0.0
+    except Exception:
+        pass
+    return _FB.get(ticker, 100.0), _FB_PCT.get(ticker, 0.0)
 
 
-@st.cache_data(ttl=180, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def get_multi_prices(tickers: tuple) -> dict[str, tuple[float, float]]:
     """
-    Batch fetch (price, pct_change) for multiple tickers.
-    Uses yf.download for efficiency — real 15-min delayed prices.
+    Batch fetch (price, pct_1d_change) for multiple tickers.
+
+    Strategy (per ticker, not batch download):
+      1. yf.Ticker(tk).fast_info  → last_price + previous_close  (most accurate)
+      2. yf.Ticker(tk).history(period="5d") → last 2 closes      (fallback)
+      3. Static _FB / _FB_PCT                                      (offline fallback)
+
+    Returns dict[ticker] = (current_price, pct_change_vs_prev_close)
+    P&L $ in dashboard = (current_price - avg_entry_price) * qty   ← always live
+    1D Var = pct_change_vs_prev_close                               ← separate metric
     """
     result: dict[str, tuple[float, float]] = {}
     if not tickers:
         return result
 
     if _YF:
-        try:
-            raw = yf.download(
-                " ".join(tickers),
-                period="5d",
-                auto_adjust=True,
-                progress=False,
-                threads=True,
-            )
-            closes = raw.get("Close", pd.DataFrame())
-            if not closes.empty:
-                if isinstance(closes, pd.Series):
-                    closes = closes.to_frame(name=tickers[0])
-                for t in tickers:
-                    if t in closes.columns:
-                        s = closes[t].dropna()
-                        if len(s) >= 2:
-                            p   = float(s.iloc[-1])
-                            prv = float(s.iloc[-2])
-                            pct = (p - prv) / prv * 100 if prv else 0.0
-                            result[t] = (p, pct)
-                        elif len(s) == 1:
-                            result[t] = (float(s.iloc[-1]), 0.0)
-        except Exception:
-            pass
+        for tk in tickers:
+            try:
+                info  = yf.Ticker(tk).fast_info
+                price = float(info.last_price)
+                prev  = float(info.previous_close)
+                if math.isnan(price) or price <= 0:
+                    raise ValueError("bad price")
+                pct = ((price - prev) / prev * 100) if prev > 0 else 0.0
+                result[tk] = (price, pct)
+                continue
+            except Exception:
+                pass
+            # Fallback: history
+            try:
+                hist = yf.Ticker(tk).history(period="5d")
+                if len(hist) >= 2:
+                    price = float(hist["Close"].iloc[-1])
+                    prev  = float(hist["Close"].iloc[-2])
+                    pct   = ((price - prev) / prev * 100) if prev > 0 else 0.0
+                    result[tk] = (price, pct)
+                elif len(hist) == 1:
+                    result[tk] = (float(hist["Close"].iloc[-1]), 0.0)
+            except Exception:
+                pass
 
-    # Fill missing with fallback
-    for t in tickers:
-        if t not in result:
-            result[t] = (_FB.get(t, 100.0), _FB_PCT.get(t, 0.0))
+    # Fill missing with static fallback
+    for tk in tickers:
+        if tk not in result:
+            result[tk] = (_FB.get(tk, 100.0), _FB_PCT.get(tk, 0.0))
 
     return result
 
@@ -183,7 +214,6 @@ def get_history(ticker: str, period: str = "1y") -> pd.DataFrame:
         return pd.DataFrame()
     try:
         df = yf.Ticker(ticker).history(period=period, auto_adjust=True)
-        # FIX: strip timezone to avoid naive/aware datetime comparisons
         if df.index.tz is not None:
             df.index = df.index.tz_localize(None)
         return df
@@ -192,17 +222,11 @@ def get_history(ticker: str, period: str = "1y") -> pd.DataFrame:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ASSET CATALOGUE  (auto-merges all assets*.csv files in data/)
+#  ASSET CATALOGUE
 # ══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_assets() -> pd.DataFrame:
-    """
-    Load assets.csv + any extra assets_*.csv files in data/.
-    Extra files must have the same columns as assets.csv.
-    Column 'category' is the primary type column.
-    Also creates a 'type' alias column for backward compatibility.
-    """
     files = sorted(glob.glob(str(DATA_DIR / "assets*.csv")))
     dfs = []
     for f in files:
@@ -216,9 +240,6 @@ def load_assets() -> pd.DataFrame:
             "currency", "exchange", "description", "type"
         ])
     df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["ticker"])
-
-    # ── FIX: ensure 'type' column exists (alias for 'category') ──────────────
-    # education.py and other pages may use df["type"] — we map category → type
     if "type" not in df.columns and "category" in df.columns:
         df["type"] = df["category"]
     elif "category" not in df.columns and "type" in df.columns:
@@ -226,20 +247,17 @@ def load_assets() -> pd.DataFrame:
     elif "category" not in df.columns and "type" not in df.columns:
         df["category"] = "Unknown"
         df["type"] = "Unknown"
-
     return df.reset_index(drop=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MARKET EVENTS  (from market_events.csv)
+#  MARKET EVENTS
 # ══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_events() -> pd.DataFrame:
-    """Load market events from data/market_events.csv."""
     try:
         df = pd.read_csv(DATA_DIR / "market_events.csv")
-        # Ensure 'active' column is boolean
         if "active" in df.columns:
             df["active"] = df["active"].astype(str).str.lower().isin(["true", "1", "yes"])
         return df
@@ -251,10 +269,9 @@ def load_events() -> pd.DataFrame:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TICKER STRIP DATA  (for app.py banner)
+#  TICKER STRIP DATA
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Major indices/assets shown in the top ticker strip
 _STRIP_TICKERS = [
     ("^GSPC", "S&P 500"), ("^IXIC", "NASDAQ"), ("^DJI", "DOW"),
     ("^FCHI", "CAC 40"), ("^GDAXI", "DAX"), ("^FTSE", "FTSE"),
@@ -263,9 +280,8 @@ _STRIP_TICKERS = [
 ]
 
 
-@st.cache_data(ttl=180, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def get_strip_data() -> list[dict]:
-    """Return ticker strip data for the top banner."""
     tickers = tuple(t for t, _ in _STRIP_TICKERS)
     prices  = get_multi_prices(tickers)
     return [
@@ -298,9 +314,8 @@ _INDICES_DEF = [
 ]
 
 
-@st.cache_data(ttl=180, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def get_indices_data() -> list[dict]:
-    """Fetch all global index prices for the indices banner."""
     tickers = tuple(s for s, _, _ in _INDICES_DEF)
     prices  = get_multi_prices(tickers)
     return [
@@ -314,12 +329,11 @@ def get_indices_data() -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  NEWS  (Google RSS → static fallback)
+#  NEWS
 # ══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_news_headlines(max_items: int = 18) -> list[dict]:
-    """Fetch financial headlines from Google News RSS. Falls back to static."""
     feeds = [
         ("https://news.google.com/rss/search?q=stock+market+financial&hl=en&gl=US&ceid=US:en", "Markets"),
         ("https://news.google.com/rss/search?q=central+bank+federal+reserve+ECB&hl=en&gl=US&ceid=US:en", "Central Banks"),
@@ -376,7 +390,6 @@ def _static_news() -> list[dict]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _default_portfolios() -> dict:
-    """Create 10 empty portfolios, one per strategy."""
     ports = {}
     for i, s in enumerate(STRATEGIES):
         pid = f"P{i + 1:02d}"
@@ -398,7 +411,7 @@ def _default_portfolios() -> dict:
 
 def _default_state() -> dict:
     return {
-        "version": "3.1",
+        "version": "4.0",
         "created": datetime.now().isoformat(),
         "teams": {
             "T01": {"id": "T01", "name": "Alpha Fund",      "emoji": "🦅", "portfolios": _default_portfolios()},
@@ -436,7 +449,6 @@ def get_or_init_state() -> dict:
 
 
 def persist():
-    """Save game state to disk."""
     if "mam_state" in st.session_state:
         save_state(st.session_state["mam_state"])
 
@@ -446,16 +458,20 @@ def persist():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def value_portfolio(portfolio: dict, prices: dict[str, float]) -> dict:
-    """Compute full portfolio valuation with unrealised P&L per position."""
+    """
+    Compute full portfolio valuation.
+    prices dict must contain current prices (floats), not tuples.
+    P&L = (current_price - avg_entry_price) * qty  — always live.
+    """
     positions = []
     spot_val  = 0.0
     for ticker, pos in portfolio.get("holdings", {}).items():
         qty  = pos.get("qty", 0)
         avg  = pos.get("avg_price", 0.0)
-        curr = prices.get(ticker, avg)
+        curr = prices.get(ticker, avg)   # current live price
         mkt  = qty * curr
         cost = qty * avg
-        pnl  = mkt - cost
+        pnl  = mkt - cost                # live unrealised P&L
         pct  = (pnl / cost * 100) if cost else 0.0
         positions.append({
             "ticker": ticker, "qty": qty,
@@ -471,10 +487,6 @@ def value_portfolio(portfolio: dict, prices: dict[str, float]) -> dict:
 
 
 def compute_risk_metrics(returns: "pd.Series") -> dict | None:
-    """
-    Compute annualised risk & performance metrics from daily return series.
-    Primary name used internally.
-    """
     if returns is None or len(returns) < 5:
         return None
     r = returns.dropna()
@@ -491,26 +503,27 @@ def compute_risk_metrics(returns: "pd.Series") -> dict | None:
     down_r  = r[r < 0]
     sortino = ann_ret / float(down_r.std() * np.sqrt(252)) if len(down_r) > 1 else 0.0
     return {
-        "ann_vol":     ann_vol,
-        "ann_ret":     ann_ret,
-        "sharpe":      sharpe,
+        "ann_vol":      ann_vol,
+        "ann_ret":      ann_ret,
+        "sharpe":       sharpe,
         "max_drawdown": mdd,
-        "var_99_10d":  var99 * np.sqrt(10),
-        "cvar_99_10d": cvar99 * np.sqrt(10),
-        "calmar":      calmar,
-        "sortino":     sortino,
+        "var_99_10d":   var99 * np.sqrt(10),
+        "cvar_99_10d":  cvar99 * np.sqrt(10),
+        "calmar":       calmar,
+        "sortino":      sortino,
     }
 
 
-# ── FIX: alias used by leaderboard.py and other legacy pages ─────────────────
+# Alias for legacy pages
 compute_portfolio_metrics = compute_risk_metrics
 
 
 def record_trade(portfolio: dict, ticker: str, action: str,
                  qty: float, price: float) -> str:
     """
-    Execute buy/sell order. Updates holdings & cash in-place.
-    Returns error message string, or '' on success.
+    Execute buy/sell. Updates holdings & cash in-place.
+    price must be the CURRENT live price fetched at trade time — not hardcoded.
+    Returns error string or '' on success.
     """
     total = qty * price
     h     = portfolio.setdefault("holdings", {})
