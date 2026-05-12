@@ -24,29 +24,47 @@ html, body, [data-testid="stApp"] {
     font-family: 'Share Tech Mono', monospace;
 }
 
-/* ── Ticker bandeaux ── */
+/* ── Sidebar toggle — toujours visible ── */
+[data-testid="stSidebarCollapseButton"] {
+    display: flex !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+}
+[data-testid="collapsedControl"] {
+    display: flex !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+}
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"] {
+    background: rgba(8,14,26,0.98) !important;
+    border-right: 1px solid rgba(0,212,255,0.1) !important;
+}
+
+/* ── Ticker bandeaux — inline dans le flux, pas fixed ── */
 .ticker-wrapper {
-    position: fixed;
-    top: 48px;
-    left: 0;
-    right: 0;
-    z-index: 999;
-    background: #080e1a;
+    width: 100%;
+    margin: 0 0 18px 0;
+    background: transparent;
 }
 
 .ticker-band {
     width: 100%;
-    height: 26px;
+    height: 24px;
     overflow: hidden;
-    background: rgba(0,10,20,0.97);
-    border-bottom: 1px solid rgba(0,212,255,0.18);
+    background: rgba(0,8,18,0.95);
+    border: 1px solid rgba(0,212,255,0.14);
+    border-radius: 4px;
     display: flex;
     align-items: center;
+    margin-bottom: 4px;
 }
 
 .ticker-band.news-band {
-    background: rgba(5,5,18,0.97);
-    border-bottom: 1px solid rgba(124,58,237,0.18);
+    background: rgba(4,4,16,0.95);
+    border-color: rgba(124,58,237,0.18);
+    margin-bottom: 0;
 }
 
 .ticker-track {
@@ -68,56 +86,41 @@ html, body, [data-testid="stApp"] {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    padding: 0 18px;
+    padding: 0 14px;
     font-family: 'Share Tech Mono', monospace;
-    font-size: 0.68rem;
+    font-size: 0.64rem;
     color: #94a3b8;
-    border-right: 1px solid rgba(255,255,255,0.06);
+    border-right: 1px solid rgba(255,255,255,0.05);
 }
 
 .ticker-item .sym {
     color: #00d4ff;
     font-weight: 700;
-    font-size: 0.66rem;
-    letter-spacing: 0.05em;
+    font-size: 0.63rem;
+    letter-spacing: 0.04em;
 }
 
-.ticker-item .px {
-    color: #e2e8f0;
-    font-size: 0.68rem;
-}
-
-.ticker-item .up   { color: #00ff88; font-size: 0.64rem; }
-.ticker-item .down { color: #ff3b6b; font-size: 0.64rem; }
+.ticker-item .px  { color: #e2e8f0; font-size: 0.64rem; }
+.ticker-item .up  { color: #00ff88; font-size: 0.61rem; }
+.ticker-item .down{ color: #ff3b6b; font-size: 0.61rem; }
 
 .news-item {
     display: inline-flex;
     align-items: center;
-    gap: 10px;
-    padding: 0 24px;
+    gap: 8px;
+    padding: 0 18px;
     font-family: 'Rajdhani', sans-serif;
-    font-size: 0.72rem;
+    font-size: 0.68rem;
     color: #7a93b0;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.03em;
     border-right: 1px solid rgba(255,255,255,0.04);
 }
 
 .news-item .tag {
     color: #7c3aed;
     font-weight: 700;
-    font-size: 0.64rem;
+    font-size: 0.61rem;
     letter-spacing: 0.1em;
-}
-
-/* Push main content below bandeaux */
-.main-offset {
-    margin-top: 100px;
-}
-
-[data-testid="stSidebar"] {
-    background: rgba(8,14,26,0.98) !important;
-    border-right: 1px solid rgba(0,212,255,0.1) !important;
-    margin-top: 52px;
 }
 
 /* Buttons */
@@ -334,7 +337,6 @@ st.markdown(f"""
     <div class="ticker-track news-track">{news_html}</div>
   </div>
 </div>
-<div class="main-offset"></div>
 """, unsafe_allow_html=True)
 
 # ── Initialise session state ───────────────────────────────────────────────────
