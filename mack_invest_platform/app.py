@@ -13,6 +13,44 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ── Forcer visibilité bouton sidebar via JS (robuste à tous les thèmes) ───────
+st.markdown("""
+<script>
+(function fixSidebarBtn() {
+    function applyStyles() {
+        // Sélecteurs possibles selon version Streamlit
+        const selectors = [
+            '[data-testid="collapsedControl"]',
+            '[data-testid="stSidebarCollapseButton"]',
+            '[data-testid="stSidebarCollapseButton"] button',
+        ];
+        selectors.forEach(sel => {
+            document.querySelectorAll(sel).forEach(el => {
+                el.style.setProperty('visibility', 'visible', 'important');
+                el.style.setProperty('display', 'flex', 'important');
+                el.style.setProperty('opacity', '1', 'important');
+                el.style.setProperty('z-index', '99999', 'important');
+                el.style.setProperty('position', 'fixed', 'important');
+                el.style.setProperty('top', '10px', 'important');
+                el.style.setProperty('left', '10px', 'important');
+                el.style.setProperty('background', 'rgba(0,212,255,0.15)', 'important');
+                el.style.setProperty('border', '1px solid rgba(0,212,255,0.5)', 'important');
+                el.style.setProperty('border-radius', '6px', 'important');
+            });
+            document.querySelectorAll(sel + ' svg').forEach(svg => {
+                svg.style.setProperty('fill', '#00d4ff', 'important');
+                svg.style.setProperty('stroke', '#00d4ff', 'important');
+            });
+        });
+    }
+    // Appliquer immédiatement puis observer les mutations DOM
+    applyStyles();
+    const observer = new MutationObserver(applyStyles);
+    observer.observe(document.body, { childList: true, subtree: true });
+})();
+</script>
+""", unsafe_allow_html=True)
+
 # ── Global CSS ─────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -32,11 +70,7 @@ footer    { visibility: hidden; }
     background: transparent !important;
     border-bottom: none !important;
     box-shadow: none !important;
-}
-
-/* Masquer uniquement le contenu décoratif du header, PAS le bouton collapse */
-[data-testid="stHeader"] > *:not([data-testid="stSidebarCollapseButton"]):not([data-testid="collapsedControl"]) {
-    visibility: hidden !important;
+    /* NE JAMAIS mettre display:none ou visibility:hidden ici */
 }
 
 /* ── Bouton collapse sidebar (sidebar ouverte) — toujours visible ── */
@@ -45,15 +79,10 @@ footer    { visibility: hidden; }
     visibility: visible !important;
     display: flex !important;
     opacity: 1 !important;
-    z-index: 9999 !important;
-    background: rgba(0,212,255,.08) !important;
-    border: 1px solid rgba(0,212,255,.25) !important;
+    z-index: 99999 !important;
+    background: rgba(0,212,255,.1) !important;
+    border: 1px solid rgba(0,212,255,.4) !important;
     border-radius: 6px !important;
-}
-[data-testid="stSidebarCollapseButton"]:hover,
-[data-testid="stSidebarCollapseButton"] button:hover {
-    background: rgba(0,212,255,.18) !important;
-    border-color: rgba(0,212,255,.5) !important;
 }
 [data-testid="stSidebarCollapseButton"] svg {
     fill: #00d4ff !important;
@@ -66,14 +95,13 @@ footer    { visibility: hidden; }
     visibility: visible !important;
     display: flex !important;
     opacity: 1 !important;
-    z-index: 9999 !important;
-    background: rgba(0,212,255,.08) !important;
-    border: 1px solid rgba(0,212,255,.25) !important;
+    z-index: 99999 !important;
+    position: fixed !important;
+    top: 10px !important;
+    left: 10px !important;
+    background: rgba(0,212,255,.1) !important;
+    border: 1px solid rgba(0,212,255,.4) !important;
     border-radius: 6px !important;
-}
-[data-testid="collapsedControl"]:hover {
-    background: rgba(0,212,255,.18) !important;
-    border-color: rgba(0,212,255,.5) !important;
 }
 [data-testid="collapsedControl"] svg {
     fill: #00d4ff !important;
