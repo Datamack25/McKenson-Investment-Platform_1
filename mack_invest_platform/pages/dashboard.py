@@ -168,48 +168,47 @@ def render():
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Portefeuilles créés ────────────────────────────────────────────────────
-    section_title("MES PORTEFEUILLES", "📁")
+    # ── Portefeuilles avec positions uniquement ────────────────────────────────
+    active_summaries = [s for s in port_summaries if s["positions"]]
 
-    for summary in port_summaries:
-        port     = summary["port"]
-        pid      = summary["pid"]
-        mkt_val  = summary["mkt_value"]
-        pnl      = summary["pnl"]
-        cost     = summary["cost"]
-        positions = summary["positions"]
-        cash     = port.get("cash", 0.0)
-        port_type = port.get("portfolio_type", "Libre")
-        ppct     = (pnl / cost * 100) if cost > 0 else 0.0
+    if active_summaries:
+        section_title("MES PORTEFEUILLES", "📁")
+        for summary in active_summaries:
+            port      = summary["port"]
+            mkt_val   = summary["mkt_value"]
+            pnl       = summary["pnl"]
+            cost      = summary["cost"]
+            positions = summary["positions"]
+            cash      = port.get("cash", 0.0)
+            port_type = port.get("portfolio_type", "Libre")
+            ppct      = (pnl / cost * 100) if cost > 0 else 0.0
+            p_col     = "#00ff88" if pnl >= 0 else "#ff3b6b"
+            sg        = "+" if pnl >= 0 else ""
+            emoji     = port.get("emoji", "📁")
+            name      = port.get("name", "—")
 
-        p_col = "#00ff88" if pnl >= 0 else "#ff3b6b"
-        sg    = "+" if pnl >= 0 else ""
-        emoji = port.get("emoji", "📁")
-        name  = port.get("name", "—")
+            # Card header
+            st.markdown(
+                f'<div style="background:rgba(0,10,25,.6);border:1px solid rgba(0,212,255,.18);'
+                f'border-radius:10px;padding:16px 20px;margin-bottom:10px;">'
+                f'<div style="display:flex;justify-content:space-between;align-items:center;'
+                f'margin-bottom:12px;">'
+                f'<div>'
+                f'<span style="font-family:Rajdhani;font-size:1.1rem;font-weight:700;'
+                f'color:#e2e8f0;">{emoji} {name}</span>'
+                f'<span style="font-family:Rajdhani;font-size:.68rem;color:#475569;'
+                f'letter-spacing:.12em;text-transform:uppercase;margin-left:10px;">{port_type}</span>'
+                f'</div>'
+                f'<div style="text-align:right;">'
+                f'<div style="font-family:Share Tech Mono;font-size:.82rem;color:#e2e8f0;">'
+                f'AUM <b>${cash + mkt_val:,.0f}</b></div>'
+                f'<div style="font-family:Share Tech Mono;font-size:.78rem;color:{p_col};">'
+                f'P&L {sg}${abs(pnl):,.2f} ({sg}{abs(ppct):.2f}%)</div>'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
 
-        # ── Card header ───────────────────────────────────────────────────────
-        st.markdown(
-            f'<div style="background:rgba(0,10,25,.6);border:1px solid rgba(0,212,255,.18);'
-            f'border-radius:10px;padding:16px 20px;margin-bottom:8px;">'
-            f'<div style="display:flex;justify-content:space-between;align-items:center;'
-            f'margin-bottom:12px;">'
-            f'<div>'
-            f'<span style="font-family:Rajdhani;font-size:1.1rem;font-weight:700;'
-            f'color:#e2e8f0;">{emoji} {name}</span>'
-            f'<span style="font-family:Rajdhani;font-size:.68rem;color:#475569;'
-            f'letter-spacing:.12em;text-transform:uppercase;margin-left:10px;">{port_type}</span>'
-            f'</div>'
-            f'<div style="text-align:right;">'
-            f'<div style="font-family:Share Tech Mono;font-size:.82rem;color:#e2e8f0;">'
-            f'AUM <b>${cash + mkt_val:,.0f}</b></div>'
-            f'<div style="font-family:Share Tech Mono;font-size:.78rem;color:{p_col};">'
-            f'P&L {sg}${abs(pnl):,.2f} ({sg}{abs(ppct):.2f}%)</div>'
-            f'</div></div>',
-            unsafe_allow_html=True,
-        )
-
-        # ── Positions de ce portefeuille (uniquement si > 0 positions) ───────
-        if positions:
+            # Tableau positions
             hdr = ["Ticker", "Qté", "Px entrée", "Px actuel", "Var. 1j", "Valeur", "P&L $", "P&L %"]
             th  = "".join(
                 f'<th style="font-family:Rajdhani;font-size:.63rem;color:#00d4ff;'
@@ -219,22 +218,20 @@ def render():
             )
             tbody = ""
             for pos in positions:
-                tk   = pos["ticker"]
-                qty  = pos["qty"]
-                avg  = pos["avg"]
-                curr = pos["curr"]
-                pd_  = pos["pct_d"]
-                p_v  = pos["mkt"]
-                p_pnl = pos["pnl"]
+                tk     = pos["ticker"]
+                qty    = pos["qty"]
+                avg    = pos["avg"]
+                curr   = pos["curr"]
+                pd_    = pos["pct_d"]
+                p_v    = pos["mkt"]
+                p_pnl  = pos["pnl"]
                 p_cost = pos["cost"]
-                p_pct = (p_pnl / p_cost * 100) if p_cost > 0 else 0.0
-
-                pc   = "#00ff88" if p_pnl > 0 else ("#ff3b6b" if p_pnl < 0 else "#94a3b8")
-                dc   = "#00ff88" if pd_ > 0 else ("#ff3b6b" if pd_ < 0 else "#94a3b8")
-                sg_p = "+" if p_pnl > 0 else ""
-                ar   = "▲" if p_pnl > 0 else ("▼" if p_pnl < 0 else "▬")
-                dr   = "▲" if pd_ > 0 else ("▼" if pd_ < 0 else "▬")
-
+                p_pct  = (p_pnl / p_cost * 100) if p_cost > 0 else 0.0
+                pc  = "#00ff88" if p_pnl > 0 else ("#ff3b6b" if p_pnl < 0 else "#94a3b8")
+                dc  = "#00ff88" if pd_ > 0 else ("#ff3b6b" if pd_ < 0 else "#94a3b8")
+                sgp = "+" if p_pnl > 0 else ""
+                ar  = "▲" if p_pnl > 0 else ("▼" if p_pnl < 0 else "▬")
+                dr  = "▲" if pd_ > 0 else ("▼" if pd_ < 0 else "▬")
                 tbody += (
                     f'<tr style="border-bottom:1px solid rgba(255,255,255,.03);">'
                     f'<td style="padding:5px 8px;color:#00d4ff;font-weight:bold;">{tk}</td>'
@@ -243,28 +240,19 @@ def render():
                     f'<td style="padding:5px 8px;">${curr:,.4f}</td>'
                     f'<td style="padding:5px 8px;color:{dc};">{dr} {abs(pd_):.2f}%</td>'
                     f'<td style="padding:5px 8px;">${p_v:,.2f}</td>'
-                    f'<td style="padding:5px 8px;color:{pc};font-weight:bold;">{sg_p}${abs(p_pnl):,.2f}</td>'
+                    f'<td style="padding:5px 8px;color:{pc};font-weight:bold;">{sgp}${abs(p_pnl):,.2f}</td>'
                     f'<td style="padding:5px 8px;color:{pc};">{ar} {abs(p_pct):.2f}%</td>'
                     f'</tr>'
                 )
-
             st.markdown(
                 f'<div style="overflow-x:auto;margin-top:4px;">'
                 f'<table style="width:100%;border-collapse:collapse;font-family:Share Tech Mono;'
                 f'font-size:.74rem;color:#e2e8f0;">'
-                f'<thead><tr>{th}</tr></thead><tbody>{tbody}</tbody></table></div>',
+                f'<thead><tr>{th}</tr></thead><tbody>{tbody}</tbody>'
+                f'</table></div></div>',
                 unsafe_allow_html=True,
             )
-        else:
-            st.markdown(
-                f'<div style="font-family:Share Tech Mono;font-size:.74rem;color:#475569;'
-                f'padding:6px 0;">Aucune position — Cash disponible : '
-                f'<span style="color:#00d4ff;">${cash:,.2f}</span></div>',
-                unsafe_allow_html=True,
-            )
-
-        # Fermer la card div
-        st.markdown('</div>', unsafe_allow_html=True)
+    # Si portefeuilles créés mais aucune position : ne rien afficher dans cette section
 
 
 def _empty_state():
