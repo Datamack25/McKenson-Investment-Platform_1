@@ -196,9 +196,54 @@ html, body, [data-testid="stApp"] {
 ::-webkit-scrollbar-track { background: rgba(0,0,0,.2); }
 ::-webkit-scrollbar-thumb { background: rgba(0,212,255,.3); border-radius: 2px; }
 
-/* Hide streamlit default header + auto multi-page nav */
-#MainMenu, footer, header { visibility: hidden; }
-[data-testid="stHeader"] { display: none !important; }
+/* Hide streamlit default header content — mais garder le bouton collapse sidebar */
+#MainMenu { visibility: hidden; }
+footer    { visibility: hidden; }
+
+/* On cache le header visuellement mais on garde sa hauteur pour le bouton collapse */
+[data-testid="stHeader"] {
+    background: transparent !important;
+    border-bottom: none !important;
+    box-shadow: none !important;
+}
+/* On masque tout dans le header SAUF le bouton collapse */
+[data-testid="stHeader"] > *:not([data-testid="stSidebarCollapseButton"]):not([data-testid="collapsedControl"]) {
+    visibility: hidden !important;
+}
+
+/* Bouton collapse sidebar — toujours bien visible */
+[data-testid="stSidebarCollapseButton"] {
+    visibility: visible !important;
+    display: flex !important;
+    opacity: 1 !important;
+    background: rgba(0,212,255,.08) !important;
+    border: 1px solid rgba(0,212,255,.25) !important;
+    border-radius: 6px !important;
+}
+[data-testid="stSidebarCollapseButton"]:hover {
+    background: rgba(0,212,255,.18) !important;
+    border-color: rgba(0,212,255,.5) !important;
+}
+[data-testid="stSidebarCollapseButton"] svg {
+    fill: #00d4ff !important;
+    stroke: #00d4ff !important;
+}
+/* Bouton quand sidebar est fermée */
+[data-testid="collapsedControl"] {
+    visibility: visible !important;
+    display: flex !important;
+    opacity: 1 !important;
+    background: rgba(0,212,255,.08) !important;
+    border: 1px solid rgba(0,212,255,.25) !important;
+    border-radius: 6px !important;
+    z-index: 1200 !important;
+}
+[data-testid="collapsedControl"] svg {
+    fill: #00d4ff !important;
+    stroke: #00d4ff !important;
+}
+
+/* Masquer nav auto Streamlit multi-pages */
 [data-testid="stSidebarNav"] { display: none !important; }
 section[data-testid="stSidebar"] ul { display: none !important; }
 
