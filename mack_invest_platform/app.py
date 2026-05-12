@@ -24,15 +24,60 @@ html, body, [data-testid="stApp"] {
     font-family: 'Share Tech Mono', monospace;
 }
 
-/* ── Sidebar toggle — toujours visible ── */
-[data-testid="stSidebarCollapseButton"] {
-    display: flex !important;
+/* ── Header : transparent mais jamais supprimé ── */
+#MainMenu { visibility: hidden; }
+footer    { visibility: hidden; }
+
+[data-testid="stHeader"] {
+    background: transparent !important;
+    border-bottom: none !important;
+    box-shadow: none !important;
+}
+
+/* Masquer uniquement le contenu décoratif du header, PAS le bouton collapse */
+[data-testid="stHeader"] > *:not([data-testid="stSidebarCollapseButton"]):not([data-testid="collapsedControl"]) {
+    visibility: hidden !important;
+}
+
+/* ── Bouton collapse sidebar (sidebar ouverte) — toujours visible ── */
+[data-testid="stSidebarCollapseButton"],
+[data-testid="stSidebarCollapseButton"] button {
     visibility: visible !important;
+    display: flex !important;
+    opacity: 1 !important;
+    z-index: 9999 !important;
+    background: rgba(0,212,255,.08) !important;
+    border: 1px solid rgba(0,212,255,.25) !important;
+    border-radius: 6px !important;
+}
+[data-testid="stSidebarCollapseButton"]:hover,
+[data-testid="stSidebarCollapseButton"] button:hover {
+    background: rgba(0,212,255,.18) !important;
+    border-color: rgba(0,212,255,.5) !important;
+}
+[data-testid="stSidebarCollapseButton"] svg {
+    fill: #00d4ff !important;
+    stroke: #00d4ff !important;
     opacity: 1 !important;
 }
+
+/* ── Bouton quand sidebar est fermée (les 3 flèches) — toujours visible ── */
 [data-testid="collapsedControl"] {
-    display: flex !important;
     visibility: visible !important;
+    display: flex !important;
+    opacity: 1 !important;
+    z-index: 9999 !important;
+    background: rgba(0,212,255,.08) !important;
+    border: 1px solid rgba(0,212,255,.25) !important;
+    border-radius: 6px !important;
+}
+[data-testid="collapsedControl"]:hover {
+    background: rgba(0,212,255,.18) !important;
+    border-color: rgba(0,212,255,.5) !important;
+}
+[data-testid="collapsedControl"] svg {
+    fill: #00d4ff !important;
+    stroke: #00d4ff !important;
     opacity: 1 !important;
 }
 
@@ -42,7 +87,7 @@ html, body, [data-testid="stApp"] {
     border-right: 1px solid rgba(0,212,255,0.1) !important;
 }
 
-/* ── Ticker bandeaux — inline dans le flux, pas fixed ── */
+/* ── Ticker bandeaux ── */
 .ticker-wrapper {
     width: 100%;
     margin: 0 0 18px 0;
@@ -195,53 +240,6 @@ html, body, [data-testid="stApp"] {
 ::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: rgba(0,0,0,.2); }
 ::-webkit-scrollbar-thumb { background: rgba(0,212,255,.3); border-radius: 2px; }
-
-/* Hide streamlit default header content — mais garder le bouton collapse sidebar */
-#MainMenu { visibility: hidden; }
-footer    { visibility: hidden; }
-
-/* On cache le header visuellement mais on garde sa hauteur pour le bouton collapse */
-[data-testid="stHeader"] {
-    background: transparent !important;
-    border-bottom: none !important;
-    box-shadow: none !important;
-}
-/* On masque tout dans le header SAUF le bouton collapse */
-[data-testid="stHeader"] > *:not([data-testid="stSidebarCollapseButton"]):not([data-testid="collapsedControl"]) {
-    visibility: hidden !important;
-}
-
-/* Bouton collapse sidebar — toujours bien visible */
-[data-testid="stSidebarCollapseButton"] {
-    visibility: visible !important;
-    display: flex !important;
-    opacity: 1 !important;
-    background: rgba(0,212,255,.08) !important;
-    border: 1px solid rgba(0,212,255,.25) !important;
-    border-radius: 6px !important;
-}
-[data-testid="stSidebarCollapseButton"]:hover {
-    background: rgba(0,212,255,.18) !important;
-    border-color: rgba(0,212,255,.5) !important;
-}
-[data-testid="stSidebarCollapseButton"] svg {
-    fill: #00d4ff !important;
-    stroke: #00d4ff !important;
-}
-/* Bouton quand sidebar est fermée */
-[data-testid="collapsedControl"] {
-    visibility: visible !important;
-    display: flex !important;
-    opacity: 1 !important;
-    background: rgba(0,212,255,.08) !important;
-    border: 1px solid rgba(0,212,255,.25) !important;
-    border-radius: 6px !important;
-    z-index: 1200 !important;
-}
-[data-testid="collapsedControl"] svg {
-    fill: #00d4ff !important;
-    stroke: #00d4ff !important;
-}
 
 /* Masquer nav auto Streamlit multi-pages */
 [data-testid="stSidebarNav"] { display: none !important; }
