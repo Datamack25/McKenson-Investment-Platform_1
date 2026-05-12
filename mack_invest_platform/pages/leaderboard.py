@@ -28,20 +28,6 @@ _P = dict(
     margin=dict(l=8, r=8, t=28, b=8),
 )
 
-# Risk level hints per strategy — shown as column in portfolio table
-_STRATEGY_HINTS = {
-    "growth":    ("High Risk",        "#ff8c00", "Volatilité élevée. Horizon 5+ ans recommandé."),
-    "value":     ("Moderate Risk",    "#ffd700", "Patience requise. Décotes parfois longues à se combler."),
-    "momentum",  ("High Risk",        "#ff8c00", "Attention aux retournements. Stop-loss conseillés."),
-    "income":    ("Low-Mod Risk",     "#00d4ff", "Surveiller la pérennité des dividendes."),
-    "macro":     ("Moderate Risk",    "#ffd700", "Diversification multi-actifs obligatoire."),
-    "hedging":   ("Low Risk",         "#00ff88", "Coûts de couverture à surveiller (theta)."),
-    "balanced":  ("Low-Mod Risk",     "#00d4ff", "Rééquilibrage périodique recommandé."),
-    "commodity": ("High Risk",        "#ff8c00", "Forte cyclicalité. Surveiller l'USD et géopolitique."),
-    "crypto":    ("Very High Risk",   "#ff3b6b", "Volatilité extrême. Ne pas dépasser 5-10% du capital."),
-    "arbitrage": ("Low Risk",         "#00ff88", "Exposition au risque d'exécution et de liquidité."),
-}
-
 # Ensure _STRATEGY_HINTS has no set syntax error — rebuild properly
 _SH: dict[str, tuple[str, str, str]] = {
     "growth":    ("High Risk",      "#ff8c00", "Volatilité élevée. Horizon 5+ ans recommandé."),
