@@ -18,6 +18,7 @@ from utils.data import (
     get_or_init_state, persist, load_assets,
     get_price, get_price_change, get_history,
     get_multi_prices, value_portfolio, record_trade,
+    get_contract_mult, get_currency,
 )
 from utils.options import bs_price, bs_greeks, implied_vol, STRATEGY_META
 
@@ -454,13 +455,18 @@ def _options_desk(port, state, team_id, port_id, assets_df):
         T           = T_days / 365.0
         r_rate      = st.slider("Taux sans risque (%)", 0.0, 10.0, 4.25, 0.1, key="opt_r") / 100
         sigma       = st.slider("Volatilité implicite (%)", 1.0, 150.0, 20.0, 0.5, key="opt_sig") / 100
-        n_contracts = st.number_input("Nombre de contrats (×100 actions)",
-                                      min_value=1, value=1, step=1, key="opt_n")
+        # contract_mult depuis assets.csv (crypto=1, forex=100000, equities=100…)
+        _mult_display = get_contract_mult(ticker)
+        n_contracts = st.number_input(
+            f"Nombre de contrats (×{_mult_display} unités)",
+            min_value=1, value=1, step=1, key="opt_n",
+        )
 
     with col_r:
         premium       = bs_price(spot, K, T, r_rate, sigma, opt_type)
         greeks        = bs_greeks(spot, K, T, r_rate, sigma, opt_type)
-        total_premium = premium * n_contracts * 100
+        mult          = get_contract_mult(ticker)
+        total_premium = premium * n_contracts * mult
 
         ratio = spot / K if K > 0 else 1.0
         if opt_type == "call":
@@ -695,6 +701,7 @@ def _options_desk(port, state, team_id, port_id, assets_df):
 
     if st.button(btn_label, disabled=len(opt_errors) > 0, key="opt_submit", type="primary"):
         opt_positions = port.setdefault("options", [])
+        mult_stored   = get_contract_mult(ticker)
         opt_positions.append({
             "date":          datetime.now().strftime("%Y-%m-%d %H:%M"),
             "ticker":        ticker,
@@ -704,9 +711,11 @@ def _options_desk(port, state, team_id, port_id, assets_df):
             "maturity_days": T_days,
             "sigma":         round(sigma * 100, 2),
             "n_contracts":   n_contracts,
+            "contract_mult": mult_stored,
             "premium":       round(premium, 6),
             "total_premium": round(total_premium, 2),
             "spot_at_entry": round(spot, 4),
+            "currency":      get_currency(ticker),
         })
         if is_buy_opt:
             port["cash"] = port.get("cash", 0) - total_premium
@@ -738,12 +747,24 @@ def _options_desk(port, state, team_id, port_id, assets_df):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MES POSITIONS — P&L RÉEL yfinance
+#  MES POSITIONS — style professionnel MTM (inspiré screenshots)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _all_positions(teams, assets_df):
-    section_title("MES POSITIONS — P&L EN TEMPS RÉEL", "📋")
+def _pnl_color(val: float) -> str:
+    if val > 0:   return "#00ff88"
+    if val < 0:   return "#ff3b6b"
+    return "#94a3b8"
 
+def _fmt_pnl(val: float) -> str:
+    s = "+" if val > 0 else ""
+    return f'{s}{val:,.4f}'
+
+def _fmt_money(val: float) -> str:
+    s = "+" if val > 0 else ""
+    return f'{s}${abs(val):,.2f}'
+
+
+def _all_positions(teams, assets_df):
     team_id = st.session_state.get("active_team")
     port_id = st.session_state.get("active_portfolio")
 
@@ -756,102 +777,226 @@ def _all_positions(teams, assets_df):
         st.info("Portefeuille introuvable.")
         return
 
+    # ── 1. HOLDINGS (Spot positions) ──────────────────────────────────────────
     holdings = port.get("holdings", {})
-    if not holdings:
-        st.info("Aucune position spot ouverte. Rendez-vous sur l'onglet Spot Trading.")
-        return
 
-    tickers = tuple(holdings.keys())
-    prices  = get_multi_prices(tickers)
+    if holdings:
+        section_title("HOLDINGS", "📊")
+        st.markdown(
+            '<div style="font-family:Share Tech Mono;font-size:.7rem;color:#475569;'
+            'margin-bottom:8px;">Valorisation mark-to-market en temps réel via yfinance.</div>',
+            unsafe_allow_html=True,
+        )
 
-    hdr = ["Ticker", "Qté", "Px entrée moy.", "Px actuel", "Var. 1j",
-           "Valeur marché", "P&L ($)", "P&L (%)"]
-    th  = "".join(
-        f'<th style="font-family:Rajdhani;font-size:.66rem;color:#00d4ff;'
-        f'letter-spacing:.09em;text-transform:uppercase;padding:7px 9px;'
-        f'background:rgba(0,212,255,.06);border-bottom:1px solid rgba(0,212,255,.15);">'
-        f'{c}</th>' for c in hdr)
+        tickers = tuple(holdings.keys())
+        prices  = get_multi_prices(tickers)
 
-    tbody     = ""
-    total_val = 0.0
-    total_pnl = 0.0
+        # KPI row
+        total_mkt  = sum(holdings[tk].get("qty", 0) * prices.get(tk, (holdings[tk].get("avg_price", 0), 0))[0]
+                         for tk in holdings)
+        total_cost = sum(holdings[tk].get("qty", 0) * holdings[tk].get("avg_price", 0)
+                         for tk in holdings)
+        total_pnl  = total_mkt - total_cost
+        total_ret  = total_pnl / total_cost if total_cost > 0 else 0.0
+        cash       = port.get("cash", 0.0)
 
-    for ticker, pos in holdings.items():
-        qty = pos.get("qty", 0)
-        avg = pos.get("avg_price", 0.0)
+        k1, k2, k3, k4, k5 = st.columns(5)
+        ks = 'background:rgba(0,10,25,.6);border:1px solid rgba(0,212,255,.15);border-radius:7px;padding:10px 12px;'
+        pc = _pnl_color(total_pnl)
+        for col, lbl, val, col_c in [
+            (k1, "Portfolio value",  f"${cash + total_mkt:,.0f}", "#e2e8f0"),
+            (k2, "Cash",             f"${cash:,.0f}",             "#00d4ff"),
+            (k3, "Market value",     f"${total_mkt:,.0f}",        "#e2e8f0"),
+            (k4, "Unreal. P&L",      f'{_fmt_money(total_pnl)}',  pc),
+            (k5, "Return",           f'{total_ret*100:+.2f}%',    pc),
+        ]:
+            col.markdown(
+                f'<div style="{ks}">'
+                f'<div style="font-family:Rajdhani;font-size:.62rem;color:#475569;'
+                f'letter-spacing:.1em;text-transform:uppercase;">{lbl}</div>'
+                f'<div style="font-family:Share Tech Mono;font-size:1rem;color:{col_c};'
+                f'font-weight:bold;margin-top:2px;">{val}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
-        # ── P&L RÉEL : prix actuel vs prix moyen d'entrée ──────────────────
-        curr, pct_d = prices.get(ticker, (avg, 0.0))
+        st.markdown("<br>", unsafe_allow_html=True)
 
-        # Si le prix actuel est identique au prix d'entrée (donnée indisponible),
-        # on marque explicitement comme N/D pour éviter 0% ou 100% trompeurs
-        price_available = curr != avg or pct_d != 0.0
+        # Table headers — inspiré screenshot "Holdings"
+        cols_h = ["ticker", "position", "qty", "last", "avg_cost",
+                  "market_value", "unreal_pnl", "exit_price_now", "return_mid"]
+        th = "".join(
+            f'<th style="font-family:Rajdhani;font-size:.64rem;color:#7a93b0;'
+            f'letter-spacing:.08em;text-transform:uppercase;padding:7px 10px;'
+            f'background:rgba(0,5,15,.8);border-bottom:1px solid rgba(255,255,255,.08);">'
+            f'{c}</th>' for c in cols_h
+        )
+        tbody = ""
 
-        mkt  = qty * curr
-        cost = qty * avg
-        pnl  = mkt - cost   # gain/perte réel en $
+        for tk, pos in holdings.items():
+            qty  = pos.get("qty", 0.0)
+            avg  = pos.get("avg_price", 0.0)
+            curr, pct_d = prices.get(tk, (avg, 0.0))
 
-        # % P&L basé sur le coût d'entrée
-        if cost > 0 and price_available:
-            ppct = pnl / cost * 100
-        elif cost == 0:
-            ppct = 0.0
-        else:
-            ppct = 0.0
+            mkt_val    = qty * curr
+            cost_val   = qty * avg
+            unreal_pnl = mkt_val - cost_val
+            ret_mid    = unreal_pnl / cost_val if cost_val > 0 else 0.0
 
-        total_val += mkt
-        total_pnl += pnl
+            # exit_price_now = prix actuel (bid/ask mid simulé = last)
+            exit_now   = curr * (1 - 0.0001)  # tiny spread simulé
 
-        # Couleurs
-        pnl_c = "#00ff88" if pnl > 0 else ("#ff3b6b" if pnl < 0 else "#94a3b8")
-        day_c = "#00ff88" if pct_d > 0 else ("#ff3b6b" if pct_d < 0 else "#94a3b8")
-        sg    = "+" if pnl > 0 else ""
-        ar    = "▲" if pnl > 0 else ("▼" if pnl < 0 else "▬")
-        vr    = "▲" if pct_d > 0 else ("▼" if pct_d < 0 else "▬")
+            pnl_c = _pnl_color(unreal_pnl)
+            ret_c = _pnl_color(ret_mid)
 
-        pnl_str  = f'{sg}${abs(pnl):,.2f}'
-        ppct_str = f'{ar} {abs(ppct):.2f}%'
+            tbody += (
+                f'<tr style="border-bottom:1px solid rgba(255,255,255,.04);">'
+                f'<td style="padding:7px 10px;color:#00d4ff;font-weight:bold;">{tk}</td>'
+                f'<td style="padding:7px 10px;color:#00ff88;font-size:.7rem;">LONG</td>'
+                f'<td style="padding:7px 10px;">{qty:,.4f}</td>'
+                f'<td style="padding:7px 10px;color:#e2e8f0;">{curr:,.4f}</td>'
+                f'<td style="padding:7px 10px;color:#7a93b0;">{avg:,.4f}</td>'
+                f'<td style="padding:7px 10px;">{mkt_val:,.2f}</td>'
+                f'<td style="padding:7px 10px;color:{pnl_c};font-weight:bold;">'
+                f'{_fmt_pnl(unreal_pnl)}</td>'
+                f'<td style="padding:7px 10px;color:#94a3b8;">{exit_now:,.4f}</td>'
+                f'<td style="padding:7px 10px;color:{ret_c};">{ret_mid:.4f}</td>'
+                f'</tr>'
+            )
 
+        # Total row
+        tc = _pnl_color(total_pnl)
         tbody += (
-            f'<tr style="border-bottom:1px solid rgba(255,255,255,.03);">'
-            f'<td style="padding:7px 9px;color:#00d4ff;font-weight:bold;">{ticker}</td>'
-            f'<td style="padding:7px 9px;">{qty:,.4f}</td>'
-            f'<td style="padding:7px 9px;color:#7a93b0;">${avg:,.4f}</td>'
-            f'<td style="padding:7px 9px;">${curr:,.4f}</td>'
-            f'<td style="padding:7px 9px;color:{day_c};">{vr} {abs(pct_d):.2f}%</td>'
-            f'<td style="padding:7px 9px;">${mkt:,.2f}</td>'
-            f'<td style="padding:7px 9px;color:{pnl_c};font-weight:bold;">{pnl_str}</td>'
-            f'<td style="padding:7px 9px;color:{pnl_c};">{ppct_str}</td>'
+            f'<tr style="background:rgba(0,212,255,.04);border-top:2px solid rgba(0,212,255,.18);">'
+            f'<td colspan="5" style="padding:7px 10px;font-family:Rajdhani;font-size:.72rem;'
+            f'color:#475569;letter-spacing:.1em;text-transform:uppercase;">'
+            f'TOTAL  —  {len(holdings)} position(s)</td>'
+            f'<td style="padding:7px 10px;color:#e2e8f0;font-weight:bold;">{total_mkt:,.2f}</td>'
+            f'<td style="padding:7px 10px;color:{tc};font-weight:bold;">'
+            f'{_fmt_pnl(total_pnl)}</td>'
+            f'<td colspan="2"></td>'
             f'</tr>'
         )
 
-    # Footer total
-    tc  = "#00ff88" if total_pnl > 0 else ("#ff3b6b" if total_pnl < 0 else "#94a3b8")
-    tsg = "+" if total_pnl > 0 else ""
-    tbody += (
-        f'<tr style="background:rgba(0,212,255,.05);border-top:1px solid rgba(0,212,255,.2);">'
-        f'<td colspan="5" style="padding:7px 9px;font-family:Rajdhani;font-size:.78rem;'
-        f'color:#7a93b0;letter-spacing:.1em;text-transform:uppercase;">'
-        f'TOTAL ({len(holdings)} position(s))</td>'
-        f'<td style="padding:7px 9px;color:#e2e8f0;font-weight:bold;">${total_val:,.2f}</td>'
-        f'<td style="padding:7px 9px;color:{tc};font-weight:bold;">{tsg}${abs(total_pnl):,.2f}</td>'
-        f'<td></td>'
-        f'</tr>'
-    )
+        st.markdown(
+            f'<div style="overflow-x:auto;border:1px solid rgba(255,255,255,.07);'
+            f'border-radius:8px;background:rgba(0,5,15,.6);">'
+            f'<table style="width:100%;border-collapse:collapse;font-family:Share Tech Mono;'
+            f'font-size:.76rem;color:#e2e8f0;">'
+            f'<thead><tr>{th}</tr></thead><tbody>{tbody}</tbody></table></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("Aucune position spot. Allez dans l'onglet Spot Trading pour en ouvrir.")
 
-    st.markdown(
-        f'<div style="overflow-x:auto;border:1px solid rgba(0,212,255,.15);border-radius:8px;">'
-        f'<table style="width:100%;border-collapse:collapse;font-family:Share Tech Mono;'
-        f'font-size:.78rem;color:#e2e8f0;">'
-        f'<thead><tr>{th}</tr></thead><tbody>{tbody}</tbody></table></div>',
-        unsafe_allow_html=True,
-    )
+    # ── 2. OPEN OPTION POSITIONS ───────────────────────────────────────────────
+    opt_pos = port.get("options", [])
+    if opt_pos:
+        st.markdown("<br>", unsafe_allow_html=True)
+        section_title("OPEN OPTION POSITIONS", "⚙️")
+        st.markdown(
+            '<div style="font-family:Share Tech Mono;font-size:.7rem;color:#475569;'
+            'margin-bottom:8px;">Your option book stays visible here even when the ticket is set to Spot.</div>',
+            unsafe_allow_html=True,
+        )
 
-    # Historique
-    section_title("HISTORIQUE DES TRANSACTIONS", "🔄")
+        # Recalcule MTM premium pour chaque option
+        opt_tickers = tuple(set(o["ticker"] for o in opt_pos))
+        opt_prices  = get_multi_prices(opt_tickers) if opt_tickers else {}
+
+        cols_o = ["underlying", "c/p", "strike", "expiry", "qty",
+                  "contract_mult", "avg_premium", "mtm_premium",
+                  "mtm_value", "unreal_pnl", "delta_total"]
+        th_o = "".join(
+            f'<th style="font-family:Rajdhani;font-size:.64rem;color:#7a93b0;'
+            f'letter-spacing:.08em;text-transform:uppercase;padding:7px 10px;'
+            f'background:rgba(0,5,15,.8);border-bottom:1px solid rgba(255,255,255,.08);">'
+            f'{c}</th>' for c in cols_o
+        )
+        tbody_o = ""
+        total_opt_pnl = 0.0
+
+        for o in opt_pos:
+            tk          = o["ticker"]
+            cp          = "C" if o["type"] == "call" else "P"
+            strike      = o["strike"]
+            n_c         = o["n_contracts"]
+            avg_prem    = o["premium"]
+            mult        = o.get("contract_mult", get_contract_mult(tk))
+            spot_now, _ = opt_prices.get(tk, (o["spot_at_entry"], 0.0))
+            T_rem       = max(o.get("maturity_days", 30) - 1, 0.5) / 365.0
+            r           = 0.0425
+            sig         = o.get("sigma", 20.0) / 100.0
+            expiry_str  = o.get("date", "—")[:10]
+
+            # Recalcule MTM premium via BS avec spot actuel
+            try:
+                from utils.options import bs_price as _bsp
+                mtm_prem = _bsp(spot_now, strike, T_rem, r, sig, o["type"])
+            except Exception:
+                mtm_prem = avg_prem
+
+            mtm_val    = mtm_prem * n_c * mult
+            cost_prem  = avg_prem * n_c * mult
+            is_long    = o.get("action", "BUY") == "BUY"
+            unreal_pnl = (mtm_val - cost_prem) if is_long else (cost_prem - mtm_val)
+
+            # Delta simplifié (Δ = 0.5 ±0.5 selon moneyness)
+            try:
+                from utils.options import bs_greeks as _bsg
+                g = _bsg(spot_now, strike, T_rem, r, sig, o["type"])
+                delta = g["delta"] * n_c * mult
+            except Exception:
+                delta = 0.0
+
+            total_opt_pnl += unreal_pnl
+            pnl_c = _pnl_color(unreal_pnl)
+
+            tbody_o += (
+                f'<tr style="border-bottom:1px solid rgba(255,255,255,.04);">'
+                f'<td style="padding:7px 10px;color:#00d4ff;font-weight:bold;">{tk}</td>'
+                f'<td style="padding:7px 10px;color:{"#00ff88" if cp=="C" else "#ff3b6b"};">{cp}</td>'
+                f'<td style="padding:7px 10px;">{strike:,.4f}</td>'
+                f'<td style="padding:7px 10px;color:#7a93b0;">{expiry_str}</td>'
+                f'<td style="padding:7px 10px;">{n_c}</td>'
+                f'<td style="padding:7px 10px;color:#475569;">{mult}</td>'
+                f'<td style="padding:7px 10px;color:#7a93b0;">{avg_prem:,.4f}</td>'
+                f'<td style="padding:7px 10px;">{mtm_prem:,.4f}</td>'
+                f'<td style="padding:7px 10px;">{mtm_val:,.2f}</td>'
+                f'<td style="padding:7px 10px;color:{pnl_c};font-weight:bold;">'
+                f'{_fmt_pnl(unreal_pnl)}</td>'
+                f'<td style="padding:7px 10px;color:#94a3b8;">{delta:,.4f}</td>'
+                f'</tr>'
+            )
+
+        # Total options
+        tc_o = _pnl_color(total_opt_pnl)
+        tbody_o += (
+            f'<tr style="background:rgba(124,58,237,.05);border-top:2px solid rgba(124,58,237,.2);">'
+            f'<td colspan="8" style="padding:7px 10px;font-family:Rajdhani;font-size:.72rem;'
+            f'color:#475569;letter-spacing:.1em;text-transform:uppercase;">'
+            f'TOTAL OPTIONS  —  {len(opt_pos)} position(s)</td>'
+            f'<td style="padding:7px 10px;color:#e2e8f0;font-weight:bold;">'
+            f'{sum(o["premium"] * o["n_contracts"] * o.get("contract_mult", get_contract_mult(o["ticker"])) for o in opt_pos):,.2f}</td>'
+            f'<td style="padding:7px 10px;color:{tc_o};font-weight:bold;">'
+            f'{_fmt_pnl(total_opt_pnl)}</td>'
+            f'<td></td>'
+            f'</tr>'
+        )
+
+        st.markdown(
+            f'<div style="overflow-x:auto;border:1px solid rgba(255,255,255,.07);'
+            f'border-radius:8px;background:rgba(0,5,15,.6);">'
+            f'<table style="width:100%;border-collapse:collapse;font-family:Share Tech Mono;'
+            f'font-size:.76rem;color:#e2e8f0;">'
+            f'<thead><tr>{th_o}</tr></thead><tbody>{tbody_o}</tbody></table></div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── 3. HISTORIQUE ─────────────────────────────────────────────────────────
     trades = port.get("trades", [])
     if trades:
-        df = pd.DataFrame(trades[-30:][::-1])
+        st.markdown("<br>", unsafe_allow_html=True)
+        section_title("HISTORIQUE DES TRANSACTIONS", "🔄")
+        df = pd.DataFrame(trades[-40:][::-1])
         st.dataframe(df, use_container_width=True, hide_index=True)
-    else:
-        st.info("Aucune transaction enregistrée.")
