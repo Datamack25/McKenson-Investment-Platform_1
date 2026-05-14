@@ -462,3 +462,21 @@ def get_contract_mult(ticker: str, assets_df=None) -> int:
         except Exception:
             pass
     return 1 if any(ticker.endswith(s) for s in ["-USD","=X","=F"]) else 100
+
+
+def get_currency(ticker: str, assets_df=None) -> str:
+    """Retourne la devise d'un ticker."""
+    if assets_df is not None:
+        try:
+            row = assets_df[assets_df["ticker"] == ticker]
+            if not row.empty and "currency" in row.columns:
+                return str(row["currency"].iloc[0])
+        except Exception:
+            pass
+    if ticker.endswith("=X"):   return "USD"
+    if ticker.endswith("-USD"):  return "USD"
+    if ".PA" in ticker:          return "EUR"
+    if ".DE" in ticker or ".AS" in ticker: return "EUR"
+    if ".L"  in ticker:          return "GBP"
+    if ".T"  in ticker:          return "JPY"
+    return "USD"
