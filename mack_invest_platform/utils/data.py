@@ -450,3 +450,15 @@ def record_trade(portfolio: dict, ticker: str, action: str,
     })
     persist()
     return ""
+
+
+def get_contract_mult(ticker: str, assets_df=None) -> int:
+    """Multiplicateur de contrat pour les options."""
+    if assets_df is not None:
+        try:
+            row = assets_df[assets_df["ticker"] == ticker]
+            if not row.empty and "contract_mult" in row.columns:
+                return int(row["contract_mult"].iloc[0])
+        except Exception:
+            pass
+    return 1 if any(ticker.endswith(s) for s in ["-USD","=X","=F"]) else 100
