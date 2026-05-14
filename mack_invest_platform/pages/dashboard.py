@@ -466,21 +466,15 @@ def render():
     for item in all_ports:
         all_tickers.update(item["port"].get("holdings", {}).keys())
 
-    live: dict = {}
+    live: dict = {}        # {ticker: (price_float, pct_float)}
+    live_prices: dict = {} # {ticker: price_float}  — pour value_portfolio
     if all_tickers:
-        batch = get_multi_prices(tuple(sorted(all_tickers)))
+        # Fetch individuel forcé ticker par ticker (plus fiable que le batch pour peu de tickers)
         for tk in all_tickers:
-            if tk in batch:
-                p, pct = batch[tk]
-                # Garde uniquement si le prix est réel (différent de 0 et non NaN)
-                if p and p == p and p > 0:
-                    live[tk] = (p, pct)
-        # Pour les tickers manquants ou avec prix invalide → fetch individuel
-        missing = all_tickers - set(live.keys())
-        for tk in missing:
             p, pct = get_price_change(tk)
             if p and p == p and p > 0:
-                live[tk] = (p, pct)
+                live[tk] = (float(p), float(pct))
+                live_prices[tk] = float(p)
 
     _comparison_panel(state, live)
 
