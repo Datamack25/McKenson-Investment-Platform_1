@@ -10,7 +10,7 @@ import uuid
 import streamlit as st
 
 from components.ui import section_title
-from utils.data import get_or_init_state, get_multi_prices, persist
+from utils.data import get_or_init_state, get_multi_prices, get_price_change, persist
 
 _TAPE_SYMBOLS = [
     ("^GSPC","S&P500"),("^IXIC","NASDAQ"),("^DJI","DOW"),("^FCHI","CAC40"),
@@ -401,13 +401,46 @@ def _comparison_panel(state: dict, live: dict):
 
 
 def render():
+    import streamlit as st
     state = get_or_init_state()
     teams = state.get("teams", {})
 
+    # ── Header + boutons ──────────────────────────────────────────────────────
+    col_h, col_refresh, col_new = st.columns([5, 1, 1])
+    with col_h:
+        st.markdown(
+            '<h1 style="font-family:Rajdhani,sans-serif;font-size:2rem;letter-spacing:.12em;'
+            'color:#00ff88;margin:0 0 6px;text-shadow:0 0 30px rgba(0,255,136,.4);">'
+            '🏠 DASHBOARD — MAM</h1>', unsafe_allow_html=True)
+    with col_refresh:
+        st.markdown("<div style='padding-top:8px;'>", unsafe_allow_html=True)
+        if st.button("🔄", key="btn_refresh", help="Rafraîchir les prix live", use_container_width=True):
+            # Vide le cache yfinance pour forcer un rechargement immédiat
+            get_multi_prices.clear()
+            get_price_change.clear()
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+    with col_new:
+        st.markdown("<div style='padding-top:8px;'>", unsafe_allow_html=True)
+        if st.button("➕", key="btn_new_top", help="Nouveau portefeuille", use_container_width=True):
+            st.session_state["force_wizard"] = True
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # Timestamp dernière mise à jour
+    import datetime as _dt
+    last_refresh = st.session_state.get("last_price_refresh", "—")
+    if st.session_state.get("_just_refreshed"):
+        now_str = _dt.datetime.now().strftime("%H:%M:%S")
+        st.session_state["last_price_refresh"] = now_str
+        st.session_state.pop("_just_refreshed", None)
+        last_refresh = now_str
+
     st.markdown(
-        '<h1 style="font-family:Rajdhani,sans-serif;font-size:2rem;letter-spacing:.12em;'
-        'color:#00ff88;margin:0 0 6px;text-shadow:0 0 30px rgba(0,255,136,.4);">'
-        '🏠 DASHBOARD — MAM</h1>', unsafe_allow_html=True)
+        f'<div style="font-family:Share Tech Mono;font-size:.65rem;color:#334155;margin-bottom:8px;">'
+        f'Prix yfinance (délai ~15 min) · Dernière MàJ : {last_refresh} '
+        f'· <span style="color:#475569;">Cliquez 🔄 pour forcer le rechargement</span></div>',
+        unsafe_allow_html=True)
 
     tape_prices = get_multi_prices(tuple(s for s, _ in _TAPE_SYMBOLS))
     st.markdown(_build_tape(tape_prices), unsafe_allow_html=True)
@@ -428,15 +461,26 @@ def render():
         _wizard(state)
         return
 
-    _, col_btn = st.columns([6, 1])
-    with col_btn:
-        if st.button("➕ Nouveau", key="btn_new_top", use_container_width=True):
-            st.session_state["force_wizard"] = True; st.rerun()
-
+    # ── Fetch prix live — avec fallback individuel si batch échoue ────────────
     all_tickers: set[str] = set()
     for item in all_ports:
         all_tickers.update(item["port"].get("holdings", {}).keys())
-    live = get_multi_prices(tuple(all_tickers)) if all_tickers else {}
+
+    live: dict = {}
+    if all_tickers:
+        batch = get_multi_prices(tuple(sorted(all_tickers)))
+        for tk in all_tickers:
+            if tk in batch:
+                p, pct = batch[tk]
+                # Garde uniquement si le prix est réel (différent de 0 et non NaN)
+                if p and p == p and p > 0:
+                    live[tk] = (p, pct)
+        # Pour les tickers manquants ou avec prix invalide → fetch individuel
+        missing = all_tickers - set(live.keys())
+        for tk in missing:
+            p, pct = get_price_change(tk)
+            if p and p == p and p > 0:
+                live[tk] = (p, pct)
 
     _comparison_panel(state, live)
 
