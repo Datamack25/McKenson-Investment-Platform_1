@@ -509,59 +509,227 @@ def render():
         st.markdown(f'<div style="{kpi}"><div style="font-family:Rajdhani;font-size:.68rem;color:#7a93b0;letter-spacing:.12em;text-transform:uppercase;">P&L Global</div><div style="font-family:Share Tech Mono;font-size:1.5rem;color:{pnl_col};">{sg}${abs(total_pnl):,.2f}</div><div style="font-size:.7rem;color:{pnl_col};">{sg}{abs(total_pnl_pct):.2f}%</div></div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    section_title("MES PORTEFEUILLES", "📁")
+
+    # ── Collecte de toutes les positions (spot + options) ─────────────────────
+    all_spot_positions = []   # [{ticker, qty, avg, curr, pct_d, mkt, cost, pnl, port_name}]
+    all_opt_positions  = []   # [{...option fields..., port_name}]
 
     for item in ports_with_pos:
-        port     = item["port"]; tlabel = item["team_label"]
-        holdings = port.get("holdings", {}); cash = port.get("cash", 0.0)
-        mkt = cost = pnl = 0.0; positions = []
-        for tk, pos in holdings.items():
-            qty = pos.get("qty",0); avg = pos.get("avg_price",0.0)
-            curr, pd_ = live.get(tk,(avg,0.0))
-            pos_mkt = qty*curr; pos_cost = qty*avg; pos_pnl = pos_mkt-pos_cost
-            mkt+=pos_mkt; cost+=pos_cost; pnl+=pos_pnl
-            positions.append({"ticker":tk,"qty":qty,"avg":avg,"curr":curr,"pct_d":pd_,"mkt":pos_mkt,"cost":pos_cost,"pnl":pos_pnl})
-        ppct  = pnl/cost*100 if cost>0 else 0.0
-        p_col = "#00ff88" if pnl>=0 else "#ff3b6b"; sg2 = "+" if pnl>=0 else ""
-        strat_obj = next((s for s in _STRATEGIES if s["id"]==port.get("strategy","")), None)
-        types_str = " ".join(_ASSET_CONSTRAINTS.get(t,{}).get("emoji","") for t in port.get("asset_types",[]))
-        warns = _check_constraints(port, live)
-        st.markdown(
-            f'<div style="background:rgba(0,10,25,.6);border:1px solid rgba(0,212,255,.18);border-radius:10px;padding:16px 20px;margin-bottom:12px;">'
-            f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">'
-            f'<div><span style="font-family:Rajdhani;font-size:1.1rem;font-weight:700;color:#e2e8f0;">{port.get("emoji","📁")} {port.get("name","—")}</span>'
-            f'<span style="font-family:Rajdhani;font-size:.62rem;color:#475569;letter-spacing:.1em;margin-left:8px;">{tlabel}</span>'
-            f'<span style="font-size:.85rem;margin-left:6px;">{types_str}</span></div>'
-            f'<div style="text-align:right;"><div style="font-family:Share Tech Mono;font-size:.82rem;color:#e2e8f0;">AUM <b>${cash+mkt:,.0f}</b></div>'
-            f'<div style="font-family:Share Tech Mono;font-size:.78rem;color:{p_col};">P&L {sg2}${abs(pnl):,.2f} ({sg2}{abs(ppct):.2f}%)</div></div>'
-            f'</div>', unsafe_allow_html=True)
-        for w in warns:
-            st.warning(w)
-        col_hdrs = ["TICKER","QTÉ","PX ENTRÉE","PX ACTUEL","VAR 1J","VALEUR","P&L $","P&L %"]
-        th = "".join(f'<th style="font-family:Rajdhani;font-size:.63rem;color:#00d4ff;letter-spacing:.08em;text-transform:uppercase;padding:6px 10px;background:rgba(0,212,255,.06);border-bottom:1px solid rgba(0,212,255,.14);">{c}</th>' for c in col_hdrs)
-        tbody = ""
-        for pos in positions:
-            tk=pos["ticker"]; qty=pos["qty"]; avg=pos["avg"]; curr=pos["curr"]; pct_d=pos["pct_d"]; p_v=pos["mkt"]; p_pnl=pos["pnl"]; p_cost=pos["cost"]
-            p_pct = p_pnl/p_cost*100 if p_cost>0 else 0.0
-            fmt = lambda v: f"${v:,.0f}" if v>=1000 else (f"${v:,.2f}" if v>=1 else f"${v:,.5f}")
-            pc  = "#00ff88" if p_pnl>0 else ("#ff3b6b" if p_pnl<0 else "#94a3b8")
-            dc  = "#00ff88" if pct_d>0 else ("#ff3b6b" if pct_d<0 else "#94a3b8")
-            sgp = "+" if p_pnl>0 else ""; sgd = "+" if pct_d>0 else ""
-            arp = "▲" if p_pnl>0 else ("▼" if p_pnl<0 else "▬")
-            ard = "▲" if pct_d>0 else ("▼" if pct_d<0 else "▬")
+        port     = item["port"]
+        tlabel   = item["team_label"]
+        port_lbl = f'{port.get("emoji","📁")} {port.get("name","—")}'
+
+        for tk, pos in port.get("holdings", {}).items():
+            qty       = pos.get("qty", 0)
+            avg       = pos.get("avg_price", 0.0)
+            curr, pd_ = live.get(tk, (avg, 0.0))
+            pos_mkt   = qty * curr
+            pos_cost  = qty * avg
+            pos_pnl   = pos_mkt - pos_cost
+            all_spot_positions.append({
+                "ticker": tk, "qty": qty, "avg": avg, "curr": curr,
+                "pct_d": pd_, "mkt": pos_mkt, "cost": pos_cost, "pnl": pos_pnl,
+                "port": port_lbl,
+            })
+
+        for o in port.get("options", []):
+            tk   = o["ticker"]
+            sp, _= live.get(tk, (o["spot_at_entry"], 0.0))
+            T_rem= max(o.get("maturity_days", 30) - 1, 0.5) / 365.0
+            mult = o.get("contract_mult", 100)
+            n    = o["n_contracts"]
+            avg_p= o["premium"]
+            try:
+                from utils.options import bs_price as _bsp, bs_greeks as _bsg
+                mtm_p = _bsp(sp, o["strike"], T_rem, 0.0425, o.get("sigma", 20)/100, o["type"])
+                delta = _bsg(sp, o["strike"], T_rem, 0.0425, o.get("sigma", 20)/100, o["type"])["delta"] * n * mult
+            except Exception:
+                mtm_p = avg_p; delta = 0.0
+            is_long = o.get("action", "BUY") == "BUY"
+            opt_pnl = (mtm_p - avg_p)*n*mult if is_long else (avg_p - mtm_p)*n*mult
+            all_opt_positions.append({
+                **o, "mtm_premium": mtm_p, "mtm_value": mtm_p*n*mult,
+                "opt_pnl": opt_pnl, "delta_total": delta, "port": port_lbl,
+            })
+
+    # P&L options global (pour KPI)
+    total_opt_pnl = sum(o["opt_pnl"] for o in all_opt_positions)
+    total_opt_val = sum(o["mtm_value"] for o in all_opt_positions)
+    grand_pnl     = total_pnl + total_opt_pnl
+    grand_pnl_pct = grand_pnl / total_cost * 100 if total_cost > 0 else 0.0
+    gp_col        = "#00ff88" if grand_pnl >= 0 else "#ff3b6b"
+    gsg           = "+" if grand_pnl >= 0 else ""
+
+    # ── 3 ONGLETS ─────────────────────────────────────────────────────────────
+    n_spot = len(all_spot_positions)
+    n_opt  = len(all_opt_positions)
+    tab_total, tab_spot, tab_opts = st.tabs([
+        f"📊 TOTAL PORTEFEUILLE",
+        f"📈 POSITIONS SPOT ({n_spot})",
+        f"⚙️ OPTIONS & DÉRIVÉS ({n_opt})",
+    ])
+
+    # ── Helpers HTML table ─────────────────────────────────────────────────────
+    def _fmt(v):
+        return f"${v:,.0f}" if abs(v)>=1000 else (f"${v:,.2f}" if abs(v)>=1 else f"${v:,.5f}")
+    def _pc(v):  return "#00ff88" if v>0 else ("#ff3b6b" if v<0 else "#94a3b8")
+    def _sg(v):  return "+" if v>0 else ""
+    def _ar(v):  return "▲" if v>0 else ("▼" if v<0 else "▬")
+
+    def _spot_table(positions, accent="#00d4ff"):
+        if not positions:
+            st.info("Aucune position spot.")
+            return
+        hdr = ["TICKER","PORTEFEUILLE","QTÉ","PX ENTRÉE","PX ACTUEL","VAR 1J","VALEUR","P&L $","P&L %"]
+        th  = "".join(f'<th style="font-family:Rajdhani;font-size:.62rem;color:{accent};letter-spacing:.08em;'
+                      f'text-transform:uppercase;padding:7px 10px;background:{accent}0d;'
+                      f'border-bottom:1px solid {accent}33;">{c}</th>' for c in hdr)
+        tbody = ""; t_mkt = t_pnl = t_cost = 0.0
+        for p in sorted(positions, key=lambda x: x["mkt"], reverse=True):
+            pc_=_pc(p["pnl"]); dc_=_pc(p["pct_d"])
+            pct= p["pnl"]/p["cost"]*100 if p["cost"] else 0
+            t_mkt+=p["mkt"]; t_pnl+=p["pnl"]; t_cost+=p["cost"]
             tbody += (
                 f'<tr style="border-bottom:1px solid rgba(255,255,255,.03);">'
-                f'<td style="padding:6px 10px;color:#00d4ff;font-weight:bold;font-family:Rajdhani;font-size:.82rem;">{tk}</td>'
-                f'<td style="padding:6px 10px;font-family:Share Tech Mono;font-size:.74rem;">{qty:,.4f}</td>'
-                f'<td style="padding:6px 10px;color:#7a93b0;font-family:Share Tech Mono;font-size:.74rem;">{fmt(avg)}</td>'
-                f'<td style="padding:6px 10px;font-family:Share Tech Mono;font-size:.74rem;">{fmt(curr)}</td>'
-                f'<td style="padding:6px 10px;color:{dc};font-family:Share Tech Mono;font-size:.74rem;">{ard} {sgd}{abs(pct_d):.2f}%</td>'
-                f'<td style="padding:6px 10px;font-family:Share Tech Mono;font-size:.74rem;">${p_v:,.2f}</td>'
-                f'<td style="padding:6px 10px;color:{pc};font-weight:bold;font-family:Share Tech Mono;font-size:.74rem;">{sgp}${abs(p_pnl):,.2f}</td>'
-                f'<td style="padding:6px 10px;color:{pc};font-family:Share Tech Mono;font-size:.74rem;">{arp} {sgp}{abs(p_pct):.2f}%</td>'
+                f'<td style="padding:7px 10px;color:{accent};font-weight:bold;font-family:Rajdhani;font-size:.85rem;">{p["ticker"]}</td>'
+                f'<td style="padding:7px 10px;font-family:Rajdhani;font-size:.68rem;color:#475569;">{p["port"]}</td>'
+                f'<td style="padding:7px 10px;font-family:Share Tech Mono;">{p["qty"]:,.4f}</td>'
+                f'<td style="padding:7px 10px;color:#7a93b0;font-family:Share Tech Mono;">{_fmt(p["avg"])}</td>'
+                f'<td style="padding:7px 10px;font-family:Share Tech Mono;">{_fmt(p["curr"])}</td>'
+                f'<td style="padding:7px 10px;color:{dc_};">{_ar(p["pct_d"])} {_sg(p["pct_d"])}{abs(p["pct_d"]):.2f}%</td>'
+                f'<td style="padding:7px 10px;font-family:Share Tech Mono;">{_fmt(p["mkt"])}</td>'
+                f'<td style="padding:7px 10px;color:{pc_};font-weight:bold;">{_sg(p["pnl"])}${abs(p["pnl"]):,.2f}</td>'
+                f'<td style="padding:7px 10px;color:{pc_};">{_ar(pct)} {_sg(pct)}{abs(pct):.2f}%</td>'
                 f'</tr>'
             )
-        st.markdown(f'<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;color:#e2e8f0;"><thead><tr>{th}</tr></thead><tbody>{tbody}</tbody></table></div></div>', unsafe_allow_html=True)
+        # Total row
+        tc_=_pc(t_pnl); tpct=t_pnl/t_cost*100 if t_cost else 0
+        tbody += (f'<tr style="background:{accent}0a;border-top:1px solid {accent}44;">'
+                  f'<td colspan="6" style="padding:7px 10px;font-family:Rajdhani;font-size:.7rem;color:#475569;letter-spacing:.1em;">TOTAL — {len(positions)} position(s)</td>'
+                  f'<td style="padding:7px 10px;font-weight:bold;">{_fmt(t_mkt)}</td>'
+                  f'<td style="padding:7px 10px;color:{tc_};font-weight:bold;">{_sg(t_pnl)}${abs(t_pnl):,.2f}</td>'
+                  f'<td style="padding:7px 10px;color:{tc_};">{_ar(tpct)} {_sg(tpct)}{abs(tpct):.2f}%</td></tr>')
+        st.markdown(f'<div style="overflow-x:auto;border:1px solid {accent}22;border-radius:8px;">'
+                    f'<table style="width:100%;border-collapse:collapse;font-family:Share Tech Mono;font-size:.75rem;color:#e2e8f0;">'
+                    f'<thead><tr>{th}</tr></thead><tbody>{tbody}</tbody></table></div>',
+                    unsafe_allow_html=True)
+
+    def _opt_table(options):
+        if not options:
+            st.info("Aucune position option ou dérivé.")
+            return
+        hdr = ["SOUS-JAC.","PORT.","C/P","STRIKE","QTÉ×MULT","PRIME ENTRÉE","PRIME MTM","VALEUR MTM","P&L","DELTA Σ"]
+        th  = "".join(f'<th style="font-family:Rajdhani;font-size:.62rem;color:#7c3aed;letter-spacing:.08em;'
+                      f'text-transform:uppercase;padding:7px 10px;background:rgba(124,58,237,.06);'
+                      f'border-bottom:1px solid rgba(124,58,237,.2);">{c}</th>' for c in hdr)
+        tbody = ""; t_val = t_pnl = 0.0
+        for o in options:
+            pc_=_pc(o["opt_pnl"]); cp_c="#00ff88" if o["type"]=="call" else "#ff3b6b"
+            mult=o.get("contract_mult",100); n=o["n_contracts"]
+            t_val+=o["mtm_value"]; t_pnl+=o["opt_pnl"]
+            tbody += (
+                f'<tr style="border-bottom:1px solid rgba(255,255,255,.03);">'
+                f'<td style="padding:7px 10px;color:#7c3aed;font-weight:bold;">{o["ticker"]}</td>'
+                f'<td style="padding:7px 10px;font-family:Rajdhani;font-size:.68rem;color:#475569;">{o["port"]}</td>'
+                f'<td style="padding:7px 10px;color:{cp_c};font-weight:bold;">{"C" if o["type"]=="call" else "P"}</td>'
+                f'<td style="padding:7px 10px;">{o["strike"]:,.4f}</td>'
+                f'<td style="padding:7px 10px;">{n}×{mult}</td>'
+                f'<td style="padding:7px 10px;color:#7a93b0;">{o["premium"]:,.4f}</td>'
+                f'<td style="padding:7px 10px;">{o["mtm_premium"]:,.4f}</td>'
+                f'<td style="padding:7px 10px;">${o["mtm_value"]:,.2f}</td>'
+                f'<td style="padding:7px 10px;color:{pc_};font-weight:bold;">{_sg(o["opt_pnl"])}${abs(o["opt_pnl"]):,.2f}</td>'
+                f'<td style="padding:7px 10px;color:#94a3b8;">{o["delta_total"]:,.4f}</td>'
+                f'</tr>'
+            )
+        tc_=_pc(t_pnl)
+        tbody += (f'<tr style="background:rgba(124,58,237,.05);border-top:1px solid rgba(124,58,237,.2);">'
+                  f'<td colspan="7" style="padding:7px 10px;font-family:Rajdhani;font-size:.7rem;color:#475569;letter-spacing:.1em;">TOTAL OPTIONS — {len(options)} position(s)</td>'
+                  f'<td style="padding:7px 10px;font-weight:bold;">${t_val:,.2f}</td>'
+                  f'<td style="padding:7px 10px;color:{tc_};font-weight:bold;">{_sg(t_pnl)}${abs(t_pnl):,.2f}</td>'
+                  f'<td></td></tr>')
+        st.markdown(f'<div style="overflow-x:auto;border:1px solid rgba(124,58,237,.2);border-radius:8px;">'
+                    f'<table style="width:100%;border-collapse:collapse;font-family:Share Tech Mono;font-size:.75rem;color:#e2e8f0;">'
+                    f'<thead><tr>{th}</tr></thead><tbody>{tbody}</tbody></table></div>',
+                    unsafe_allow_html=True)
+
+    # ── ONGLET 1 : TOTAL ──────────────────────────────────────────────────────
+    with tab_total:
+        # KPI bande globale (spot + options)
+        kpi = 'background:rgba(0,10,25,.7);border:1px solid rgba(0,212,255,.15);border-radius:8px;padding:12px 16px;'
+        c1,c2,c3,c4,c5 = st.columns(5)
+        for col, lbl, val, vc in [
+            (c1, "AUM Total",        f"${total_aum + total_opt_val:,.0f}", "#e2e8f0"),
+            (c2, "Cash",             f"${total_cash:,.0f}",                "#00d4ff"),
+            (c3, "Spot (mkt)",       f"${total_mkt:,.0f}",                 "#e2e8f0"),
+            (c4, "Options (MTM)",    f"${total_opt_val:,.0f}",             "#7c3aed"),
+            (c5, "P&L GLOBAL TOTAL", f"{gsg}${abs(grand_pnl):,.2f} ({gsg}{abs(grand_pnl_pct):.2f}%)", gp_col),
+        ]:
+            col.markdown(f'<div style="{kpi}"><div style="font-family:Rajdhani;font-size:.62rem;color:#475569;letter-spacing:.1em;text-transform:uppercase;">{lbl}</div>'
+                         f'<div style="font-family:Share Tech Mono;font-size:1rem;color:{vc};font-weight:bold;margin-top:3px;">{val}</div></div>',
+                         unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # Contraintes
+        for item in ports_with_pos:
+            for w in _check_constraints(item["port"], live):
+                st.warning(w)
+
+        section_title("TOUTES LES POSITIONS SPOT", "📈")
+        _spot_table(all_spot_positions)
+
+        if all_opt_positions:
+            st.markdown("<br>", unsafe_allow_html=True)
+            section_title("TOUTES LES OPTIONS & DÉRIVÉS", "⚙️")
+            _opt_table(all_opt_positions)
+
+    # ── ONGLET 2 : SPOT SEULEMENT ─────────────────────────────────────────────
+    with tab_spot:
+        # KPI spot only
+        kpi2 = 'background:rgba(0,10,25,.7);border:1px solid rgba(0,212,255,.12);border-radius:8px;padding:12px 16px;'
+        c1,c2,c3,c4 = st.columns(4)
+        spot_pct_total = total_pnl/total_cost*100 if total_cost else 0
+        sp_col = "#00ff88" if total_pnl>=0 else "#ff3b6b"
+        sp_sg  = "+" if total_pnl>=0 else ""
+        for col, lbl, val, vc in [
+            (c1, "Valeur spot",   f"${total_mkt:,.0f}",        "#e2e8f0"),
+            (c2, "Cash",          f"${total_cash:,.0f}",        "#00d4ff"),
+            (c3, "P&L spot ($)",  f"{sp_sg}${abs(total_pnl):,.2f}", sp_col),
+            (c4, "P&L spot (%)",  f"{sp_sg}{abs(spot_pct_total):.2f}%", sp_col),
+        ]:
+            col.markdown(f'<div style="{kpi2}"><div style="font-family:Rajdhani;font-size:.62rem;color:#475569;letter-spacing:.1em;text-transform:uppercase;">{lbl}</div>'
+                         f'<div style="font-family:Share Tech Mono;font-size:1rem;color:{vc};font-weight:bold;margin-top:3px;">{val}</div></div>',
+                         unsafe_allow_html=True)
+        st.markdown(
+            f'<div style="font-family:Share Tech Mono;font-size:.68rem;color:#334155;margin:8px 0 16px;">'
+            f'ℹ️ Performance P&L global (spot + options) : '
+            f'<span style="color:{gp_col};font-weight:bold;">{gsg}${abs(grand_pnl):,.2f} ({gsg}{abs(grand_pnl_pct):.2f}%)</span>'
+            f'</div>', unsafe_allow_html=True)
+        _spot_table(all_spot_positions)
+
+    # ── ONGLET 3 : OPTIONS SEULEMENT ─────────────────────────────────────────
+    with tab_opts:
+        if all_opt_positions:
+            kpi3 = 'background:rgba(0,10,25,.7);border:1px solid rgba(124,58,237,.2);border-radius:8px;padding:12px 16px;'
+            c1,c2,c3 = st.columns(3)
+            op_col = "#00ff88" if total_opt_pnl>=0 else "#ff3b6b"
+            op_sg  = "+" if total_opt_pnl>=0 else ""
+            for col, lbl, val, vc in [
+                (c1, "Valeur MTM options", f"${total_opt_val:,.2f}", "#7c3aed"),
+                (c2, "P&L options ($)",    f"{op_sg}${abs(total_opt_pnl):,.2f}", op_col),
+                (c3, "Positions ouvertes", str(n_opt), "#e2e8f0"),
+            ]:
+                col.markdown(f'<div style="{kpi3}"><div style="font-family:Rajdhani;font-size:.62rem;color:#475569;letter-spacing:.1em;text-transform:uppercase;">{lbl}</div>'
+                             f'<div style="font-family:Share Tech Mono;font-size:1rem;color:{vc};font-weight:bold;margin-top:3px;">{val}</div></div>',
+                             unsafe_allow_html=True)
+            st.markdown(
+                f'<div style="font-family:Share Tech Mono;font-size:.68rem;color:#334155;margin:8px 0 16px;">'
+                f'ℹ️ Performance P&L global (spot + options) : '
+                f'<span style="color:{gp_col};font-weight:bold;">{gsg}${abs(grand_pnl):,.2f} ({gsg}{abs(grand_pnl_pct):.2f}%)</span>'
+                f'</div>', unsafe_allow_html=True)
+            _opt_table(all_opt_positions)
+        else:
+            st.info("Aucune position option ou dérivé ouverte. Passez des ordres depuis le Trading Desk → onglet Options.")
 
 
 def _show_empty_ports(all_ports: list):
