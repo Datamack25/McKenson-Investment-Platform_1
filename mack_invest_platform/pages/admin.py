@@ -19,6 +19,54 @@ import streamlit as st
 from components.ui import section_title, metric_row
 from utils.data import get_or_init_state, persist, load_assets, INITIAL_CASH
 
+# ── À ajouter dans pages/admin.py, dans la fonction render() ─────────────────
+# Bloc de persistance permanente — copier-coller dans Streamlit Secrets
+
+def _render_persistence_block():
+    """Affiche la clé d'état encodée pour copier dans les Streamlit Secrets."""
+    import streamlit as st
+    from utils.data import get_or_init_state, _encode_state
+
+    state = get_or_init_state()
+    b64   = _encode_state(state)
+    n_teams = len(state.get("teams", {}))
+    n_ports = sum(len(t.get("portfolios",{})) for t in state.get("teams",{}).values())
+    n_trades= sum(
+        len(p.get("trades",[]))
+        for t in state.get("teams",{}).values()
+        for p in t.get("portfolios",{}).values()
+    )
+
+    st.markdown("""
+    <div style="background:rgba(255,215,0,.06);border:1px solid rgba(255,215,0,.3);
+    border-radius:10px;padding:16px 20px;margin-bottom:20px;">
+    <div style="font-family:Rajdhani,sans-serif;font-size:1rem;font-weight:700;
+    color:#ffd700;letter-spacing:.12em;margin-bottom:8px;">
+    💾 SAUVEGARDE PERMANENTE — STREAMLIT SECRETS</div>
+    <div style="font-family:Share Tech Mono,monospace;font-size:.72rem;color:#94a3b8;
+    line-height:1.8;margin-bottom:12px;">
+    Streamlit Cloud efface le filesystem à chaque redémarrage.<br>
+    Copiez la clé ci-dessous dans vos <b style="color:#ffd700;">Streamlit Secrets</b>
+    pour rendre les données permanentes.<br>
+    <b style="color:#00d4ff;">share.streamlit.io → votre app → Settings → Secrets</b>
+    </div>""", unsafe_allow_html=True)
+
+    st.code(f'game_state_b64 = "{b64}"', language="toml")
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Équipes", n_teams)
+    col2.metric("Portefeuilles", n_ports)
+    col3.metric("Trades", n_trades)
+
+    st.markdown("""
+    <div style="font-family:Share Tech Mono,monospace;font-size:.7rem;color:#475569;margin-top:8px;">
+    ⚠️ Mettez à jour cette clé dans les Secrets après chaque session de trading importante.
+    </div></div>""", unsafe_allow_html=True)
+
+
+# Appeler dans render() :
+# _render_persistence_block()
+
 _ADMIN_PASSWORD = "MAM2026"
 _P = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
           font=dict(color="#94a3b8", family="Share Tech Mono"),
